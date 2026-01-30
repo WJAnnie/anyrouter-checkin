@@ -62,25 +62,50 @@ def get_accounts() -> list:
         return []
 
 
-async def get_user_info(client: httpx.AsyncClient, domain: str, user_info_path: str) -> Optional[dict]:
-    """获取用户信息"""
-    try:
-        url = f"{domain}{user_info_path}"
-        response = await client.get(url, headers=HEADERS)
+async def get_user_info(client: httpx.AsyncClient, domain: str, user_info_path: str, retry: int = 3) -> Optional[dict]:
+    """获取用户信息（带重试）"""
+    for attempt in range(retry):
+        try:
+            url = f"{domain}{user_info_path}"
+            response = await client.get(url, headers=HEADERS)
 
-        if response.status_code == 401:
-            log("认证失败，session 可能已过期", "ERROR")
+            if response.status_code == 401:
+                log("认证失败，session 可能已过期", "ERROR")
+                return None
+
+            if response.status_code != 200:
+                if attempt < retry - 1:
+                    await asyncio.sleep(1)
+                    continue
+                return None
+
+            text = response.text
+            if not text or text.startswith("<"):
+                # 可能是 WAF 页面，重试
+                if attempt < retry - 1:
+                    await asyncio.sleep(2)
+                    continue
+                return None
+
+            data = response.json()
+            if data.get("success") and data.get("data"):
+                return data.get("data")
+            elif data.get("data"):
+                return data.get("data")
+            return data
+        except json.JSONDecodeError:
+            if attempt < retry - 1:
+                await asyncio.sleep(1)
+                continue
+            log("获取用户信息: 响应不是有效的 JSON", "WARN")
             return None
-
-        response.raise_for_status()
-        data = response.json()
-
-        if data.get("success") or data.get("data"):
-            return data.get("data", data)
-        return None
-    except Exception as e:
-        log(f"获取用户信息失败: {e}", "ERROR")
-        return None
+        except Exception as e:
+            if attempt < retry - 1:
+                await asyncio.sleep(1)
+                continue
+            log(f"获取用户信息失败: {e}", "ERROR")
+            return None
+    return None
 
 
 async def do_sign_in(client: httpx.AsyncClient, domain: str, sign_in_path: str) -> dict:
@@ -247,25 +272,34 @@ async def main():
     log(f"成功: {success_count}, 失败: {fail_count}")
     log("=" * 50)
 
-    # 打印详细结果
+    # 打印详细结果并构建推送内容
     notify_lines = []
     for r in results:
-        status = "✓" if r["success"] else "✗"
-        balance_info = ""
+        status = "✅" if r["success"] else "❌"
+        line = f"{status} **{r['name']}**: {r['message']}"
+
+        # 添加余额信息
         if r["balance_after"] is not None:
-            balance_info = f" | 余额: ${r['balance_after']:.2f}"
-        line = f"{status} {r['name']}: {r['message']}{balance_info}"
-        log(line)
+            line += f"\n   - 当前余额: **${r['balance_after']:.2f}**"
+            if r["balance_before"] is not None:
+                reward = r["balance_after"] - r["balance_before"]
+                if reward > 0:
+                    line += f"\n   - 签到奖励: +${reward:.2f}"
+
+        log(f"{'✓' if r['success'] else '✗'} {r['name']}: {r['message']}" +
+            (f" | 余额: ${r['balance_after']:.2f}" if r["balance_after"] else ""))
         notify_lines.append(line)
 
     # Server酱 推送
     title = f"AnyRouter 签到 - 成功{success_count} 失败{fail_count}"
-    content = f"## 签到结果\n\n"
-    content += f"- 时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-    content += f"- 成功: {success_count}, 失败: {fail_count}\n\n"
-    content += "## 详情\n\n"
+    content = f"## 📋 签到结果\n\n"
+    content += f"- ⏰ 时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+    content += f"- ✅ 成功: {success_count}\n"
+    content += f"- ❌ 失败: {fail_count}\n\n"
+    content += "---\n\n"
+    content += "## 📊 账号详情\n\n"
     for line in notify_lines:
-        content += f"- {line}\n"
+        content += f"{line}\n\n"
     await send_serverchan(title, content)
 
     # 如果有失败的，返回非零退出码
