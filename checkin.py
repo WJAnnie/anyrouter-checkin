@@ -2,6 +2,7 @@
 """
 AnyRouter 自动签到脚本
 支持多账号、多平台签到，兼容 NewAPI/OneAPI 平台
+支持 Server酱 推送通知
 """
 
 import asyncio
@@ -199,6 +200,25 @@ async def process_account(account: dict) -> dict:
     return result
 
 
+async def send_serverchan(title: str, content: str):
+    """通过 Server酱 推送通知"""
+    key = os.environ.get("SERVERCHAN_KEY", "")
+    if not key:
+        return
+
+    url = f"https://sctapi.ftqq.com/{key}.send"
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.post(url, data={"title": title, "desp": content})
+            data = response.json()
+            if data.get("code") == 0:
+                log("Server酱 推送成功")
+            else:
+                log(f"Server酱 推送失败: {data.get('message', '')}", "ERROR")
+    except Exception as e:
+        log(f"Server酱 推送异常: {e}", "ERROR")
+
+
 async def main():
     """主函数"""
     log("=" * 50)
@@ -228,12 +248,25 @@ async def main():
     log("=" * 50)
 
     # 打印详细结果
+    notify_lines = []
     for r in results:
         status = "✓" if r["success"] else "✗"
         balance_info = ""
         if r["balance_after"] is not None:
             balance_info = f" | 余额: ${r['balance_after']:.2f}"
-        log(f"{status} {r['name']}: {r['message']}{balance_info}")
+        line = f"{status} {r['name']}: {r['message']}{balance_info}"
+        log(line)
+        notify_lines.append(line)
+
+    # Server酱 推送
+    title = f"AnyRouter 签到 - 成功{success_count} 失败{fail_count}"
+    content = f"## 签到结果\n\n"
+    content += f"- 时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+    content += f"- 成功: {success_count}, 失败: {fail_count}\n\n"
+    content += "## 详情\n\n"
+    for line in notify_lines:
+        content += f"- {line}\n"
+    await send_serverchan(title, content)
 
     # 如果有失败的，返回非零退出码
     if fail_count > 0:

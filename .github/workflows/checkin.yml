@@ -3,8 +3,8 @@ name: AnyRouter 自动签到
 
 on:
   schedule:
-    # 每6小时执行一次 (UTC 时间)
-    - cron: '0 */6 * * *'
+    # 每天北京时间 8:30 执行 (UTC 0:30)
+    - cron: '30 0 * * *'
   workflow_dispatch:
     # 支持手动触发
 
@@ -30,4 +30,5 @@ jobs:
       - name: 执行签到
         env:
           ANYROUTER_ACCOUNTS: ${{ secrets.ANYROUTER_ACCOUNTS }}
+          SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
         run: python checkin.py
