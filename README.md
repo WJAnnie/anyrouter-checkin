@@ -40,3 +40,4 @@
 ## 签到奖励
 
 每日签到可获得 $25 额度。
+# Auto check-in for AnyRouter
