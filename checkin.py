@@ -238,6 +238,8 @@ async def process_account(account: dict, waf_cookies_cache: dict) -> dict:
         await asyncio.sleep(1)
         user_info = await get_user_info(client, domain, user_info_path)
         if user_info:
+            # 打印完整的用户信息用于调试
+            log(f"完整用户信息: {json.dumps(user_info, ensure_ascii=False)}")
             quota = user_info.get("quota", 0)
             used = user_info.get("used_quota", 0)
             balance_raw = quota - used
