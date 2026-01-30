@@ -96,6 +96,49 @@ async def get_waf_cookies(domain: str) -> dict:
     return waf_cookies
 
 
+async def auto_login(domain: str, username: str, password: str, waf_cookies: dict) -> Optional[str]:
+    """使用用户名密码自动登录，返回新的 session cookie"""
+    log(f"正在自动登录: {username}...")
+
+    login_url = f"{domain}/api/user/login"
+    cookie_str = "; ".join([f"{k}={v}" for k, v in waf_cookies.items()])
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+            headers = {**HEADERS, "Cookie": cookie_str}
+            response = await client.post(
+                login_url,
+                headers=headers,
+                json={"username": username, "password": password},
+            )
+
+            # 从 Set-Cookie 头中提取 session
+            session_cookie = None
+            for header_value in response.headers.get_list("set-cookie"):
+                if "session=" in header_value:
+                    session_cookie = header_value.split("session=")[1].split(";")[0]
+                    break
+
+            if session_cookie:
+                log(f"自动登录成功，获取到新 session")
+                return session_cookie
+
+            # 有些实现可能在响应体中返回 token
+            try:
+                data = response.json()
+                if data.get("success") or data.get("status") == "ok":
+                    log("登录 API 返回成功，但未获取到 session cookie", "WARN")
+                else:
+                    log(f"登录失败: {data.get('message', str(data))}", "ERROR")
+            except json.JSONDecodeError:
+                log(f"登录响应解析失败: {response.text[:200]}", "ERROR")
+
+    except Exception as e:
+        log(f"自动登录异常: {e}", "ERROR")
+
+    return None
+
+
 async def get_user_info(client: httpx.AsyncClient, domain: str, user_info_path: str) -> Optional[dict]:
     """获取用户信息"""
     try:
@@ -180,6 +223,8 @@ async def process_account(account: dict, waf_cookies_cache: dict) -> dict:
     name = account.get("name", "未命名账号")
     cookies = account.get("cookies", {})
     api_user = account.get("api_user", "")
+    username = account.get("username", "")
+    password = account.get("password", "")
     provider_name = account.get("provider", "anyrouter")
 
     provider = PROVIDERS.get(provider_name, PROVIDERS["anyrouter"])
@@ -213,6 +258,23 @@ async def process_account(account: dict, waf_cookies_cache: dict) -> dict:
         if api_user:
             client.headers["New-Api-User"] = str(api_user)
 
+        # 先检测 session 是否有效
+        user_info = await get_user_info(client, domain, user_info_path)
+        session_valid = user_info is not None
+
+        # 如果 session 无效且有账号密码，尝试自动登录
+        if not session_valid and username and password:
+            log("Session 已过期，尝试自动登录...", "WARN")
+            new_session = await auto_login(domain, username, password, waf_cookies)
+            if new_session:
+                # 用新 session 重新构建 cookies
+                all_cookies["session"] = new_session
+                cookie_str = "; ".join([f"{k}={v}" for k, v in all_cookies.items()])
+                client.headers["Cookie"] = cookie_str
+                log("已使用新 session cookie")
+            else:
+                log("自动登录失败", "ERROR")
+
         # 执行签到
         sign_result = await do_sign_in(client, domain, sign_in_path)
         result["success"] = sign_result["success"]
@@ -230,11 +292,9 @@ async def process_account(account: dict, waf_cookies_cache: dict) -> dict:
             quota = user_info.get("quota", 0)
             used = user_info.get("used_quota", 0)
 
-            # AnyRouter 的余额计算：quota 就是剩余额度，不需要减去 used_quota
-            # used_quota 是历史累计消耗
-            result["balance"] = quota / 500000  # 当前剩余
-            result["used"] = used / 500000      # 历史消耗
-            result["quota"] = (quota + used) / 500000  # 总获得额度
+            result["balance"] = quota / 500000
+            result["used"] = used / 500000
+            result["quota"] = (quota + used) / 500000
 
             log(f"当前余额: ${result['balance']:.2f}, 历史消耗: ${result['used']:.2f}, 总获得: ${result['quota']:.2f}")
         else:
