@@ -130,21 +130,8 @@ async def get_user_info(client: httpx.AsyncClient, domain: str, user_info_path: 
 
 
 def format_balance(quota: int, used_quota: int) -> float:
-    """转换余额为美元
-    NewAPI/OneAPI 的 quota 单位通常是 1/500000 美元
-    但有些实例可能使用不同的单位，这里自动检测
-    """
-    balance_raw = quota - used_quota
-    # 尝试判断正确的除数
-    # 如果 balance_raw / 500000 小于 1 但 / 50000 大于 1，可能需要用 50000
-    balance_500k = balance_raw / 500000
-    balance_50k = balance_raw / 50000
-
-    # 如果余额看起来太小（小于1美元）且用较小除数更合理，则使用较小除数
-    # 否则使用标准的 500000
-    if balance_500k < 1 and balance_50k >= 1:
-        return balance_50k
-    return balance_500k
+    """转换余额为美元 (已弃用，直接在使用处计算)"""
+    return (quota - used_quota) / 500000
 
 
 async def do_sign_in(client: httpx.AsyncClient, domain: str, sign_in_path: str) -> dict:
@@ -205,6 +192,8 @@ async def process_account(account: dict, waf_cookies_cache: dict) -> dict:
         "provider": provider_name,
         "success": False,
         "message": "",
+        "quota": None,
+        "used": None,
         "balance": None,
     }
 
@@ -238,14 +227,13 @@ async def process_account(account: dict, waf_cookies_cache: dict) -> dict:
         await asyncio.sleep(1)
         user_info = await get_user_info(client, domain, user_info_path)
         if user_info:
-            # 打印完整的用户信息用于调试
-            log(f"完整用户信息: {json.dumps(user_info, ensure_ascii=False)}")
             quota = user_info.get("quota", 0)
             used = user_info.get("used_quota", 0)
-            balance_raw = quota - used
-            log(f"原始数据: quota={quota}, used={used}, balance_raw={balance_raw}")
-            result["balance"] = format_balance(quota, used)
-            log(f"当前余额: ${result['balance']:.2f}")
+            # 总额度和已用额度都转换为美元（除以 500000）
+            result["quota"] = quota / 500000
+            result["used"] = used / 500000
+            result["balance"] = (quota - used) / 500000
+            log(f"总额度: ${result['quota']:.2f}, 已用: ${result['used']:.2f}, 剩余: ${result['balance']:.2f}")
         else:
             log("未能获取余额信息", "WARN")
 
@@ -304,14 +292,15 @@ async def main():
     for r in results:
         status = "✅" if r["success"] else "❌"
         line = f"{status} **{r['name']}**: {r['message']}"
-        if r["balance"] is not None:
-            line += f"\n   - 💰 当前余额: **${r['balance']:.2f}**"
+        if r["quota"] is not None:
+            line += f"\n   - 💰 总额度: **${r['quota']:.2f}**"
+            line += f"\n   - 📊 剩余: ${r['balance']:.2f} (已用: ${r['used']:.2f})"
         else:
             line += f"\n   - 💰 余额: 获取失败"
 
         log_line = f"{'✓' if r['success'] else '✗'} {r['name']}: {r['message']}"
         if r["balance"] is not None:
-            log_line += f" | 余额: ${r['balance']:.2f}"
+            log_line += f" | 总额: ${r['quota']:.2f}, 剩余: ${r['balance']:.2f}"
         log(log_line)
         notify_lines.append(line)
 
