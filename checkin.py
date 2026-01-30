@@ -229,11 +229,14 @@ async def process_account(account: dict, waf_cookies_cache: dict) -> dict:
         if user_info:
             quota = user_info.get("quota", 0)
             used = user_info.get("used_quota", 0)
-            # 总额度和已用额度都转换为美元（除以 500000）
-            result["quota"] = quota / 500000
-            result["used"] = used / 500000
-            result["balance"] = (quota - used) / 500000
-            log(f"总额度: ${result['quota']:.2f}, 已用: ${result['used']:.2f}, 剩余: ${result['balance']:.2f}")
+
+            # AnyRouter 的余额计算：quota 就是剩余额度，不需要减去 used_quota
+            # used_quota 是历史累计消耗
+            result["balance"] = quota / 500000  # 当前剩余
+            result["used"] = used / 500000      # 历史消耗
+            result["quota"] = (quota + used) / 500000  # 总获得额度
+
+            log(f"当前余额: ${result['balance']:.2f}, 历史消耗: ${result['used']:.2f}, 总获得: ${result['quota']:.2f}")
         else:
             log("未能获取余额信息", "WARN")
 
@@ -292,15 +295,15 @@ async def main():
     for r in results:
         status = "✅" if r["success"] else "❌"
         line = f"{status} **{r['name']}**: {r['message']}"
-        if r["quota"] is not None:
-            line += f"\n   - 💰 总额度: **${r['quota']:.2f}**"
-            line += f"\n   - 📊 剩余: ${r['balance']:.2f} (已用: ${r['used']:.2f})"
+        if r["balance"] is not None:
+            line += f"\n   - 💰 当前余额: **${r['balance']:.2f}**"
+            line += f"\n   - 📊 历史消耗: ${r['used']:.2f}"
         else:
             line += f"\n   - 💰 余额: 获取失败"
 
         log_line = f"{'✓' if r['success'] else '✗'} {r['name']}: {r['message']}"
         if r["balance"] is not None:
-            log_line += f" | 总额: ${r['quota']:.2f}, 剩余: ${r['balance']:.2f}"
+            log_line += f" | 余额: ${r['balance']:.2f}, 消耗: ${r['used']:.2f}"
         log(log_line)
         notify_lines.append(line)
 
