@@ -130,8 +130,21 @@ async def get_user_info(client: httpx.AsyncClient, domain: str, user_info_path: 
 
 
 def format_balance(quota: int, used_quota: int) -> float:
-    """转换余额为美元"""
-    return (quota - used_quota) / 500000
+    """转换余额为美元
+    NewAPI/OneAPI 的 quota 单位通常是 1/500000 美元
+    但有些实例可能使用不同的单位，这里自动检测
+    """
+    balance_raw = quota - used_quota
+    # 尝试判断正确的除数
+    # 如果 balance_raw / 500000 小于 1 但 / 50000 大于 1，可能需要用 50000
+    balance_500k = balance_raw / 500000
+    balance_50k = balance_raw / 50000
+
+    # 如果余额看起来太小（小于1美元）且用较小除数更合理，则使用较小除数
+    # 否则使用标准的 500000
+    if balance_500k < 1 and balance_50k >= 1:
+        return balance_50k
+    return balance_500k
 
 
 async def do_sign_in(client: httpx.AsyncClient, domain: str, sign_in_path: str) -> dict:
@@ -227,6 +240,8 @@ async def process_account(account: dict, waf_cookies_cache: dict) -> dict:
         if user_info:
             quota = user_info.get("quota", 0)
             used = user_info.get("used_quota", 0)
+            balance_raw = quota - used
+            log(f"原始数据: quota={quota}, used={used}, balance_raw={balance_raw}")
             result["balance"] = format_balance(quota, used)
             log(f"当前余额: ${result['balance']:.2f}")
         else:
