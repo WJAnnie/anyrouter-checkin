@@ -77,18 +77,8 @@ async def playwright_session(domain: str, cookies: dict, api_user: str = "", use
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
             context = await browser.new_context(user_agent=HEADERS["User-Agent"])
-            page = await context.new_page()
 
-            # 访问首页，等待 WAF JS 执行
-            log(f"正在通过浏览器访问 {domain}...")
-            await page.goto(domain, wait_until="networkidle", timeout=60000)
-            await page.wait_for_timeout(5000)
-
-            # 刷新页面确保 WAF cookie 生效
-            await page.reload(wait_until="networkidle", timeout=60000)
-            await page.wait_for_timeout(3000)
-
-            # 添加用户的 session cookie
+            # 添加用户的 session cookie（在创建页面前）
             if cookies.get("session"):
                 await context.add_cookies([{
                     "name": "session",
@@ -97,24 +87,37 @@ async def playwright_session(domain: str, cookies: dict, api_user: str = "", use
                     "path": "/"
                 }])
 
-            # 检查 session 是否有效
-            log("检查 session 有效性...")
-            check_result = await page.evaluate(f"""
-                async () => {{
-                    try {{
-                        const headers = {{'Accept': 'application/json', 'Content-Type': 'application/json'}};
-                        {'headers["New-Api-User"] = "' + api_user + '";' if api_user else ''}
-                        const resp = await fetch('{domain}/api/user/self', {{headers, credentials: 'include'}});
-                        const text = await resp.text();
-                        if (text.startsWith('<') || resp.status === 401) return null;
-                        return JSON.parse(text);
-                    }} catch (e) {{
-                        return null;
-                    }}
-                }}
-            """)
+            page = await context.new_page()
 
-            session_valid = check_result and check_result.get("success")
+            # 用于捕获 /api/user/self 的响应
+            captured_user_info = {}
+
+            async def handle_response(response):
+                if "/api/user/self" in response.url and response.status == 200:
+                    try:
+                        data = await response.json()
+                        if data.get("success") and data.get("data"):
+                            captured_user_info["data"] = data["data"]
+                        elif data.get("data"):
+                            captured_user_info["data"] = data["data"]
+                    except Exception:
+                        pass
+
+            page.on("response", handle_response)
+
+            # 访问首页，等待 WAF JS 执行
+            log(f"正在通过浏览器访问 {domain}...")
+            await page.goto(domain, wait_until="networkidle", timeout=60000)
+            await page.wait_for_timeout(5000)
+
+            # 检查 session 是否有效 - 尝试导航到 console
+            log("检查 session 有效性...")
+            await page.goto(f"{domain}/console", wait_until="networkidle", timeout=60000)
+            await page.wait_for_timeout(3000)
+
+            # 检查是否被重定向到登录页
+            current_url = page.url
+            session_valid = "login" not in current_url and captured_user_info.get("data") is not None
 
             # 如果 session 无效且有账号密码，尝试登录
             if not session_valid and username and password:
@@ -138,14 +141,16 @@ async def playwright_session(domain: str, cookies: dict, api_user: str = "", use
 
                 if login_result and login_result.get("success"):
                     log("浏览器内登录成功")
-                    # 获取新的 session cookie
                     browser_cookies = await context.cookies()
                     for c in browser_cookies:
                         if c["name"] == "session":
                             new_session = c["value"]
                             break
+                    # 登录后重新导航到 console 以触发 /api/user/self
+                    await page.goto(f"{domain}/console", wait_until="networkidle", timeout=60000)
+                    await page.wait_for_timeout(3000)
                 else:
-                    log(f"浏览器内登录失败: {login_result.get('message', '未知错误')}", "ERROR")
+                    log(f"浏览器内登录失败: {login_result.get('message', '未知错误') if login_result else '无响应'}", "ERROR")
 
             # 执行签到
             log("执行签到...")
@@ -169,12 +174,12 @@ async def playwright_session(domain: str, cookies: dict, api_user: str = "", use
                 }}
             """)
 
-            # 等待一下再获取用户信息
+            # 签到后重新获取余额
             await page.wait_for_timeout(1000)
-
-            # 获取用户信息（余额）
             log("获取用户余额...")
-            user_info = await page.evaluate(f"""
+
+            # 先尝试通过页面内 fetch 获取
+            fetched_info = await page.evaluate(f"""
                 async () => {{
                     try {{
                         const headers = {{'Accept': 'application/json', 'Content-Type': 'application/json'}};
@@ -191,6 +196,13 @@ async def playwright_session(domain: str, cookies: dict, api_user: str = "", use
                     }}
                 }}
             """)
+
+            if fetched_info and fetched_info.get("quota") is not None:
+                user_info = fetched_info
+            elif captured_user_info.get("data"):
+                # 使用之前页面自动请求时捕获的数据
+                log("使用页面自动加载时捕获的用户信息")
+                user_info = captured_user_info["data"]
 
             await browser.close()
 
