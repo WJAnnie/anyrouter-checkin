@@ -110,16 +110,15 @@ async def playwright_session(domain: str, cookies: dict, api_user: str = "", use
             await page.goto(domain, wait_until="networkidle", timeout=60000)
             await page.wait_for_timeout(5000)
 
-            # 检查 session 是否有效 - 尝试导航到 console
-            log("检查 session 有效性...")
+            # 导航到 console 页面，触发 SPA 的 API 调用
+            log("导航到 console 页面...")
             await page.goto(f"{domain}/console", wait_until="networkidle", timeout=60000)
-            await page.wait_for_timeout(3000)
+            await page.wait_for_timeout(5000)
 
-            # 检查是否被重定向到登录页
+            # 检查是否需要登录
             current_url = page.url
             session_valid = "login" not in current_url and captured_user_info.get("data") is not None
 
-            # 如果 session 无效且有账号密码，尝试登录
             if not session_valid and username and password:
                 log("Session 无效，尝试浏览器内登录...", "WARN")
                 login_result = await page.evaluate(f"""
@@ -146,61 +145,56 @@ async def playwright_session(domain: str, cookies: dict, api_user: str = "", use
                         if c["name"] == "session":
                             new_session = c["value"]
                             break
-                    # 登录后重新导航到 console 以触发 /api/user/self
+                    # 登录后重新导航到 console
                     await page.goto(f"{domain}/console", wait_until="networkidle", timeout=60000)
-                    await page.wait_for_timeout(3000)
+                    await page.wait_for_timeout(5000)
                 else:
-                    log(f"浏览器内登录失败: {login_result.get('message', '未知错误') if login_result else '无响应'}", "ERROR")
+                    msg = login_result.get('message', '未知错误') if login_result else '无响应'
+                    log(f"浏览器内登录失败: {msg}", "ERROR")
+
+            # 使用 Playwright APIRequestContext 发请求（共享浏览器 cookies）
+            api_headers = {"Accept": "application/json", "Content-Type": "application/json"}
+            if api_user:
+                api_headers["New-Api-User"] = str(api_user)
 
             # 执行签到
             log("执行签到...")
-            sign_result = await page.evaluate(f"""
-                async () => {{
-                    try {{
-                        const headers = {{'Accept': 'application/json', 'Content-Type': 'application/json'}};
-                        {'headers["New-Api-User"] = "' + api_user + '";' if api_user else ''}
-                        const resp = await fetch('{domain}/api/user/sign_in', {{
-                            method: 'POST',
-                            headers: headers,
-                            body: '{{}}',
-                            credentials: 'include'
-                        }});
-                        const text = await resp.text();
-                        if (text.startsWith('<')) return {{success: false, message: '被 WAF 拦截'}};
-                        return JSON.parse(text);
-                    }} catch (e) {{
-                        return {{success: false, message: e.toString()}};
-                    }}
-                }}
-            """)
+            try:
+                sign_resp = await context.request.post(
+                    f"{domain}/api/user/sign_in",
+                    headers=api_headers,
+                    data="{}"
+                )
+                sign_text = await sign_resp.text()
+                if sign_text.startswith("<"):
+                    sign_result = {"success": False, "message": "被 WAF 拦截"}
+                else:
+                    sign_result = json.loads(sign_text)
+            except Exception as e:
+                sign_result = {"success": False, "message": str(e)}
 
-            # 签到后重新获取余额
+            # 获取余额
             await page.wait_for_timeout(1000)
             log("获取用户余额...")
+            try:
+                info_resp = await context.request.get(
+                    f"{domain}/api/user/self",
+                    headers=api_headers
+                )
+                info_text = await info_resp.text()
+                if not info_text.startswith("<"):
+                    data = json.loads(info_text)
+                    if data.get("success") and data.get("data"):
+                        user_info = data["data"]
+                    elif data.get("data"):
+                        user_info = data["data"]
+                    else:
+                        user_info = data
+            except Exception:
+                pass
 
-            # 先尝试通过页面内 fetch 获取
-            fetched_info = await page.evaluate(f"""
-                async () => {{
-                    try {{
-                        const headers = {{'Accept': 'application/json', 'Content-Type': 'application/json'}};
-                        {'headers["New-Api-User"] = "' + api_user + '";' if api_user else ''}
-                        const resp = await fetch('{domain}/api/user/self', {{headers, credentials: 'include'}});
-                        const text = await resp.text();
-                        if (text.startsWith('<')) return null;
-                        const data = JSON.parse(text);
-                        if (data.success && data.data) return data.data;
-                        if (data.data) return data.data;
-                        return data;
-                    }} catch (e) {{
-                        return null;
-                    }}
-                }}
-            """)
-
-            if fetched_info and fetched_info.get("quota") is not None:
-                user_info = fetched_info
-            elif captured_user_info.get("data"):
-                # 使用之前页面自动请求时捕获的数据
+            # 如果 API 请求也获取不到，用捕获的数据
+            if not user_info and captured_user_info.get("data"):
                 log("使用页面自动加载时捕获的用户信息")
                 user_info = captured_user_info["data"]
 
