@@ -96,16 +96,19 @@ async def playwright_session(domain: str, cookies: dict, api_user: str = "", use
                 try:
                     url = response.url
                     if response.status == 200:
+                        text = await response.text()
+                        if text.startswith("<") or not text.strip():
+                            return
                         if "/api/user/self" in url:
-                            data = await response.json()
-                            log(f"[DEBUG] /api/user/self 响应: {json.dumps(data, ensure_ascii=False)[:500]}")
+                            data = json.loads(text)
+                            log(f"[DEBUG] /api/user/self 响应: {text[:500]}")
                             if data.get("success") and data.get("data"):
                                 captured_data["user_info"] = data["data"]
                             elif data.get("data"):
                                 captured_data["user_info"] = data["data"]
                         elif "/api/user/sign_in" in url:
-                            data = await response.json()
-                            log(f"[DEBUG] /api/user/sign_in 响应: {json.dumps(data, ensure_ascii=False)[:300]}")
+                            data = json.loads(text)
+                            log(f"[DEBUG] /api/user/sign_in 响应: {text[:300]}")
                             captured_data["sign_in"] = data
                 except Exception as e:
                     log(f"[DEBUG] 响应解析错误: {e}")
@@ -154,6 +157,14 @@ async def playwright_session(domain: str, cookies: dict, api_user: str = "", use
                     # 重新加载 console 页面获取用户信息
                     await page.reload(wait_until="networkidle", timeout=60000)
                     await page.wait_for_timeout(3000)
+
+                    # 如果没有提供 api_user，尝试从登录响应或用户信息中获取
+                    if not api_user and captured_data.get("user_info"):
+                        user_id = captured_data["user_info"].get("id")
+                        if user_id:
+                            api_user = str(user_id)
+                            api_user_header = f'headers["New-Api-User"] = "{api_user}";'
+                            log(f"从用户信息获取 api_user: {api_user}")
                 else:
                     msg = login_result.get('message', '未知错误') if login_result else '无响应'
                     log(f"浏览器内登录失败: {msg}", "ERROR")
