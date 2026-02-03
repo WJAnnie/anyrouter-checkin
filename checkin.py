@@ -149,16 +149,28 @@ async def playwright_session(domain: str, cookies: dict, api_user: str = "", use
 
                 if login_result and login_result.get("success"):
                     log("浏览器内登录成功")
+                    log(f"[DEBUG] 登录响应: {json.dumps(login_result, ensure_ascii=False)[:500]}")
+
                     browser_cookies = await context.cookies()
                     for c in browser_cookies:
                         if c["name"] == "session":
                             new_session = c["value"]
                             break
+
+                    # 尝试从登录响应中获取用户 ID
+                    if not api_user:
+                        login_data = login_result.get("data", {})
+                        user_id = login_data.get("id") or login_data.get("user_id") or login_data.get("userId")
+                        if user_id:
+                            api_user = str(user_id)
+                            api_user_header = f'headers["New-Api-User"] = "{api_user}";'
+                            log(f"从登录响应获取 api_user: {api_user}")
+
                     # 重新加载 console 页面获取用户信息
                     await page.reload(wait_until="networkidle", timeout=60000)
                     await page.wait_for_timeout(3000)
 
-                    # 如果没有提供 api_user，尝试从登录响应或用户信息中获取
+                    # 如果还没有 api_user，尝试从页面响应中获取
                     if not api_user and captured_data.get("user_info"):
                         user_id = captured_data["user_info"].get("id")
                         if user_id:
