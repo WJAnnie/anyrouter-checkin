@@ -81,7 +81,11 @@ async def playwright_session(domain: str, cookies: dict, api_user: str = "", use
 
             # 访问首页，等待 WAF JS 执行
             log(f"正在通过浏览器访问 {domain}...")
-            await page.goto(domain, wait_until="networkidle", timeout=30000)
+            await page.goto(domain, wait_until="networkidle", timeout=60000)
+            await page.wait_for_timeout(5000)
+
+            # 刷新页面确保 WAF cookie 生效
+            await page.reload(wait_until="networkidle", timeout=60000)
             await page.wait_for_timeout(3000)
 
             # 添加用户的 session cookie
@@ -100,7 +104,7 @@ async def playwright_session(domain: str, cookies: dict, api_user: str = "", use
                     try {{
                         const headers = {{'Accept': 'application/json', 'Content-Type': 'application/json'}};
                         {'headers["New-Api-User"] = "' + api_user + '";' if api_user else ''}
-                        const resp = await fetch('{domain}/api/user/self', {{headers}});
+                        const resp = await fetch('{domain}/api/user/self', {{headers, credentials: 'include'}});
                         const text = await resp.text();
                         if (text.startsWith('<') || resp.status === 401) return null;
                         return JSON.parse(text);
@@ -121,7 +125,8 @@ async def playwright_session(domain: str, cookies: dict, api_user: str = "", use
                             const resp = await fetch('{domain}/api/user/login', {{
                                 method: 'POST',
                                 headers: {{'Accept': 'application/json', 'Content-Type': 'application/json'}},
-                                body: JSON.stringify({{username: '{username}', password: '{password}'}})
+                                body: JSON.stringify({{username: '{username}', password: '{password}'}}),
+                                credentials: 'include'
                             }});
                             const data = await resp.json();
                             return data;
@@ -152,7 +157,8 @@ async def playwright_session(domain: str, cookies: dict, api_user: str = "", use
                         const resp = await fetch('{domain}/api/user/sign_in', {{
                             method: 'POST',
                             headers: headers,
-                            body: '{{}}'
+                            body: '{{}}',
+                            credentials: 'include'
                         }});
                         const text = await resp.text();
                         if (text.startsWith('<')) return {{success: false, message: '被 WAF 拦截'}};
@@ -173,7 +179,7 @@ async def playwright_session(domain: str, cookies: dict, api_user: str = "", use
                     try {{
                         const headers = {{'Accept': 'application/json', 'Content-Type': 'application/json'}};
                         {'headers["New-Api-User"] = "' + api_user + '";' if api_user else ''}
-                        const resp = await fetch('{domain}/api/user/self', {{headers}});
+                        const resp = await fetch('{domain}/api/user/self', {{headers, credentials: 'include'}});
                         const text = await resp.text();
                         if (text.startsWith('<')) return null;
                         const data = JSON.parse(text);
