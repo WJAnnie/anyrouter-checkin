@@ -23,7 +23,7 @@ PROVIDERS = {
         "user_info_path": "/api/user/self",
     },
     "agentrouter": {
-        "domain": "https://agentrouter.top",
+        "domain": "https://agentrouter.org",
         "sign_in_path": "/api/user/sign_in",
         "user_info_path": "/api/user/self",
     },
