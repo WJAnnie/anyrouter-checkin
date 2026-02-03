@@ -98,15 +98,17 @@ async def playwright_session(domain: str, cookies: dict, api_user: str = "", use
                     if response.status == 200:
                         if "/api/user/self" in url:
                             data = await response.json()
+                            log(f"[DEBUG] /api/user/self 响应: {json.dumps(data, ensure_ascii=False)[:500]}")
                             if data.get("success") and data.get("data"):
                                 captured_data["user_info"] = data["data"]
                             elif data.get("data"):
                                 captured_data["user_info"] = data["data"]
                         elif "/api/user/sign_in" in url:
                             data = await response.json()
+                            log(f"[DEBUG] /api/user/sign_in 响应: {json.dumps(data, ensure_ascii=False)[:300]}")
                             captured_data["sign_in"] = data
-                except Exception:
-                    pass
+                except Exception as e:
+                    log(f"[DEBUG] 响应解析错误: {e}")
 
             page.on("response", handle_response)
 
@@ -190,6 +192,7 @@ async def playwright_session(domain: str, cookies: dict, api_user: str = "", use
             # 使用捕获的数据
             if captured_data.get("user_info"):
                 user_info = captured_data["user_info"]
+                log(f"[DEBUG] 捕获到用户信息: quota={user_info.get('quota')}, used_quota={user_info.get('used_quota')}")
 
             # 如果还没有，手动 fetch 一次
             if not user_info:
@@ -203,6 +206,7 @@ async def playwright_session(domain: str, cookies: dict, api_user: str = "", use
                                 credentials: 'include'
                             }});
                             const text = await resp.text();
+                            console.log('fetch /api/user/self response:', text.substring(0, 500));
                             if (text.startsWith('<')) return null;
                             const data = JSON.parse(text);
                             if (data.success && data.data) return data.data;
@@ -213,8 +217,10 @@ async def playwright_session(domain: str, cookies: dict, api_user: str = "", use
                         }}
                     }}
                 """)
-                if fetched and fetched.get("quota") is not None:
-                    user_info = fetched
+                if fetched:
+                    log(f"[DEBUG] fetch 获取的用户信息: {json.dumps(fetched, ensure_ascii=False)[:300]}")
+                    if fetched.get("quota") is not None:
+                        user_info = fetched
 
             await browser.close()
 
@@ -253,9 +259,9 @@ async def process_account(account: dict) -> dict:
         domain, cookies, api_user, username, password
     )
 
-    # 如果 Playwright 签到失败（被 WAF 拦截），尝试用 httpx 配合 Playwright 获取的 cookies
+    # 如果 Playwright 签到失败（被 WAF 拦截），尝试模拟点击签到按钮
     if sign_result and sign_result.get("message") == "被 WAF 拦截":
-        log("尝试备用方案: 使用 httpx 签到...", "WARN")
+        log("尝试备用方案: 模拟点击签到按钮...", "WARN")
         try:
             from playwright.async_api import async_playwright
             async with async_playwright() as p:
@@ -272,38 +278,95 @@ async def process_account(account: dict) -> dict:
                     }])
 
                 page = await context.new_page()
-                await page.goto(domain, wait_until="networkidle", timeout=60000)
+
+                # 监听 API 响应
+                backup_user_info = {}
+                backup_sign_result = {}
+
+                async def handle_backup_response(response):
+                    try:
+                        if response.status == 200:
+                            if "/api/user/self" in response.url:
+                                data = await response.json()
+                                if data.get("success") and data.get("data"):
+                                    backup_user_info["data"] = data["data"]
+                                elif data.get("data"):
+                                    backup_user_info["data"] = data["data"]
+                            elif "/api/user/sign_in" in response.url:
+                                data = await response.json()
+                                backup_sign_result["data"] = data
+                    except Exception:
+                        pass
+
+                page.on("response", handle_backup_response)
+
+                # 访问 console 页面
+                await page.goto(f"{domain}/console", wait_until="networkidle", timeout=60000)
                 await page.wait_for_timeout(5000)
 
-                # 获取所有 cookies
-                all_cookies = await context.cookies()
-                cookie_dict = {c["name"]: c["value"] for c in all_cookies}
+                # 尝试找到并点击签到按钮
+                # 常见的签到按钮文本: "签到", "Sign In", "Check In", "每日签到"
+                sign_buttons = [
+                    'button:has-text("签到")',
+                    'button:has-text("每日签到")',
+                    'button:has-text("Sign")',
+                    '[class*="sign"]',
+                    'text=签到',
+                ]
+
+                clicked = False
+                for selector in sign_buttons:
+                    try:
+                        btn = page.locator(selector).first
+                        if await btn.is_visible(timeout=2000):
+                            log(f"找到签到按钮: {selector}")
+                            await btn.click()
+                            clicked = True
+                            await page.wait_for_timeout(3000)
+                            break
+                    except Exception:
+                        continue
+
+                if clicked and backup_sign_result.get("data"):
+                    sign_result = backup_sign_result["data"]
+                    log(f"点击签到结果: {sign_result}")
+
+                # 尝试从页面提取余额信息
+                if not user_info:
+                    # 等待页面加载用户信息
+                    await page.wait_for_timeout(2000)
+
+                    if backup_user_info.get("data"):
+                        user_info = backup_user_info["data"]
+                        log(f"从页面响应获取到用户信息")
+                    else:
+                        # 尝试从页面 DOM 读取余额
+                        balance_text = await page.evaluate("""
+                            () => {
+                                // 尝试多种方式找余额
+                                const selectors = [
+                                    '[class*="quota"]',
+                                    '[class*="balance"]',
+                                    '[class*="credit"]',
+                                    'text=/\\$[0-9.]+/'
+                                ];
+                                for (const sel of selectors) {
+                                    try {
+                                        const el = document.querySelector(sel);
+                                        if (el) return el.textContent;
+                                    } catch (e) {}
+                                }
+                                // 搜索包含 $ 的文本
+                                const all = document.body.innerText;
+                                const match = all.match(/\\$([0-9,]+\\.?[0-9]*)/);
+                                if (match) return match[0];
+                                return null;
+                            }
+                        """)
+                        if balance_text:
+                            log(f"从页面 DOM 提取到余额文本: {balance_text}")
+
                 await browser.close()
-
-            # 用 httpx 发请求
-            cookie_str = "; ".join([f"{k}={v}" for k, v in cookie_dict.items()])
-            headers = {**HEADERS, "Cookie": cookie_str}
-            if api_user:
-                headers["New-Api-User"] = str(api_user)
-
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                # 签到
-                resp = await client.post(f"{domain}/api/user/sign_in", headers=headers, json={})
-                text = resp.text
-                if not text.startswith("<"):
-                    sign_result = json.loads(text)
-                    log(f"备用方案签到结果: {sign_result}")
-
-                # 获取余额
-                await asyncio.sleep(1)
-                resp = await client.get(f"{domain}/api/user/self", headers=headers)
-                text = resp.text
-                if not text.startswith("<"):
-                    data = json.loads(text)
-                    if data.get("success") and data.get("data"):
-                        user_info = data["data"]
-                    elif data.get("data"):
-                        user_info = data["data"]
         except Exception as e:
             log(f"备用方案失败: {e}", "ERROR")
 
