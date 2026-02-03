@@ -11,7 +11,7 @@ import json
 import os
 import sys
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Tuple
 
 import httpx
 
@@ -58,167 +58,143 @@ def get_accounts() -> list:
         return []
 
 
-async def get_waf_cookies(domain: str) -> dict:
-    """使用 Playwright 获取 WAF cookies"""
+async def playwright_session(domain: str, cookies: dict, api_user: str = "", username: str = "", password: str = "") -> Tuple[Optional[dict], Optional[dict], Optional[str]]:
+    """
+    使用 Playwright 在浏览器中执行所有操作（登录、签到、获取余额）
+    返回: (sign_result, user_info, new_session)
+    """
     try:
         from playwright.async_api import async_playwright
     except ImportError:
-        log("Playwright 未安装，跳过 WAF cookie 获取", "WARN")
-        return {}
+        log("Playwright 未安装", "ERROR")
+        return None, None, None
 
-    waf_cookies = {}
+    sign_result = None
+    user_info = None
+    new_session = None
+
     try:
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
-            context = await browser.new_context(
-                user_agent=HEADERS["User-Agent"],
-            )
+            context = await browser.new_context(user_agent=HEADERS["User-Agent"])
             page = await context.new_page()
 
-            log(f"正在通过浏览器访问 {domain} 获取 WAF cookies...")
+            # 访问首页，等待 WAF JS 执行
+            log(f"正在通过浏览器访问 {domain}...")
             await page.goto(domain, wait_until="networkidle", timeout=30000)
-            # 等待 WAF JS 执行完毕
             await page.wait_for_timeout(3000)
 
-            cookies = await context.cookies()
-            for cookie in cookies:
-                waf_cookies[cookie["name"]] = cookie["value"]
+            # 添加用户的 session cookie
+            if cookies.get("session"):
+                await context.add_cookies([{
+                    "name": "session",
+                    "value": cookies["session"],
+                    "domain": domain.replace("https://", "").replace("http://", ""),
+                    "path": "/"
+                }])
+
+            # 检查 session 是否有效
+            log("检查 session 有效性...")
+            check_result = await page.evaluate(f"""
+                async () => {{
+                    try {{
+                        const headers = {{'Accept': 'application/json', 'Content-Type': 'application/json'}};
+                        {'headers["New-Api-User"] = "' + api_user + '";' if api_user else ''}
+                        const resp = await fetch('{domain}/api/user/self', {{headers}});
+                        const text = await resp.text();
+                        if (text.startsWith('<') || resp.status === 401) return null;
+                        return JSON.parse(text);
+                    }} catch (e) {{
+                        return null;
+                    }}
+                }}
+            """)
+
+            session_valid = check_result and check_result.get("success")
+
+            # 如果 session 无效且有账号密码，尝试登录
+            if not session_valid and username and password:
+                log("Session 无效，尝试浏览器内登录...", "WARN")
+                login_result = await page.evaluate(f"""
+                    async () => {{
+                        try {{
+                            const resp = await fetch('{domain}/api/user/login', {{
+                                method: 'POST',
+                                headers: {{'Accept': 'application/json', 'Content-Type': 'application/json'}},
+                                body: JSON.stringify({{username: '{username}', password: '{password}'}})
+                            }});
+                            const data = await resp.json();
+                            return data;
+                        }} catch (e) {{
+                            return {{success: false, message: e.toString()}};
+                        }}
+                    }}
+                """)
+
+                if login_result and login_result.get("success"):
+                    log("浏览器内登录成功")
+                    # 获取新的 session cookie
+                    browser_cookies = await context.cookies()
+                    for c in browser_cookies:
+                        if c["name"] == "session":
+                            new_session = c["value"]
+                            break
+                else:
+                    log(f"浏览器内登录失败: {login_result.get('message', '未知错误')}", "ERROR")
+
+            # 执行签到
+            log("执行签到...")
+            sign_result = await page.evaluate(f"""
+                async () => {{
+                    try {{
+                        const headers = {{'Accept': 'application/json', 'Content-Type': 'application/json'}};
+                        {'headers["New-Api-User"] = "' + api_user + '";' if api_user else ''}
+                        const resp = await fetch('{domain}/api/user/sign_in', {{
+                            method: 'POST',
+                            headers: headers,
+                            body: '{{}}'
+                        }});
+                        const text = await resp.text();
+                        if (text.startsWith('<')) return {{success: false, message: '被 WAF 拦截'}};
+                        return JSON.parse(text);
+                    }} catch (e) {{
+                        return {{success: false, message: e.toString()}};
+                    }}
+                }}
+            """)
+
+            # 等待一下再获取用户信息
+            await page.wait_for_timeout(1000)
+
+            # 获取用户信息（余额）
+            log("获取用户余额...")
+            user_info = await page.evaluate(f"""
+                async () => {{
+                    try {{
+                        const headers = {{'Accept': 'application/json', 'Content-Type': 'application/json'}};
+                        {'headers["New-Api-User"] = "' + api_user + '";' if api_user else ''}
+                        const resp = await fetch('{domain}/api/user/self', {{headers}});
+                        const text = await resp.text();
+                        if (text.startsWith('<')) return null;
+                        const data = JSON.parse(text);
+                        if (data.success && data.data) return data.data;
+                        if (data.data) return data.data;
+                        return data;
+                    }} catch (e) {{
+                        return null;
+                    }}
+                }}
+            """)
 
             await browser.close()
 
-            if waf_cookies:
-                log(f"获取到 WAF cookies: {list(waf_cookies.keys())}")
-            else:
-                log("未获取到 WAF cookies", "WARN")
     except Exception as e:
-        log(f"Playwright 获取 WAF cookies 失败: {e}", "ERROR")
+        log(f"Playwright 操作失败: {e}", "ERROR")
 
-    return waf_cookies
-
-
-async def auto_login(domain: str, username: str, password: str, waf_cookies: dict) -> Optional[str]:
-    """使用用户名密码自动登录，返回新的 session cookie"""
-    log(f"正在自动登录: {username}...")
-
-    login_url = f"{domain}/api/user/login"
-    cookie_str = "; ".join([f"{k}={v}" for k, v in waf_cookies.items()])
-
-    try:
-        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
-            headers = {**HEADERS, "Cookie": cookie_str}
-            response = await client.post(
-                login_url,
-                headers=headers,
-                json={"username": username, "password": password},
-            )
-
-            # 从 Set-Cookie 头中提取 session
-            session_cookie = None
-            for header_value in response.headers.get_list("set-cookie"):
-                if "session=" in header_value:
-                    session_cookie = header_value.split("session=")[1].split(";")[0]
-                    break
-
-            if session_cookie:
-                log(f"自动登录成功，获取到新 session")
-                return session_cookie
-
-            # 有些实现可能在响应体中返回 token
-            try:
-                data = response.json()
-                if data.get("success") or data.get("status") == "ok":
-                    log("登录 API 返回成功，但未获取到 session cookie", "WARN")
-                else:
-                    log(f"登录失败: {data.get('message', str(data))}", "ERROR")
-            except json.JSONDecodeError:
-                log(f"登录响应解析失败: {response.text[:200]}", "ERROR")
-
-    except Exception as e:
-        log(f"自动登录异常: {e}", "ERROR")
-
-    return None
+    return sign_result, user_info, new_session
 
 
-async def get_user_info(client: httpx.AsyncClient, domain: str, user_info_path: str) -> Optional[dict]:
-    """获取用户信息"""
-    try:
-        url = f"{domain}{user_info_path}"
-        response = await client.get(url, headers=HEADERS)
-
-        if response.status_code == 401:
-            log("认证失败，session 可能已过期", "ERROR")
-            return None
-
-        if response.status_code != 200:
-            log(f"获取用户信息: HTTP {response.status_code}", "WARN")
-            return None
-
-        text = response.text
-        if not text or text.startswith("<"):
-            log("获取用户信息: 被 WAF 拦截", "WARN")
-            return None
-
-        data = response.json()
-        if data.get("success") and data.get("data"):
-            return data["data"]
-        elif data.get("data"):
-            return data["data"]
-        return data
-    except json.JSONDecodeError:
-        log("获取用户信息: 响应不是有效的 JSON", "WARN")
-        return None
-    except Exception as e:
-        log(f"获取用户信息失败: {e}", "ERROR")
-        return None
-
-
-def format_balance(quota: int, used_quota: int) -> float:
-    """转换余额为美元 (已弃用，直接在使用处计算)"""
-    return (quota - used_quota) / 500000
-
-
-async def do_sign_in(client: httpx.AsyncClient, domain: str, sign_in_path: str) -> dict:
-    """执行签到"""
-    result = {"success": False, "message": ""}
-    try:
-        url = f"{domain}{sign_in_path}"
-        response = await client.post(url, headers=HEADERS, json={})
-
-        if response.status_code == 401:
-            result["message"] = "认证失败，请更新 session cookie"
-            return result
-
-        try:
-            data = response.json()
-            if data.get("success") is True:
-                result["success"] = True
-                result["message"] = data.get("message", "签到成功")
-            elif data.get("ret") == 1:
-                result["success"] = True
-                result["message"] = data.get("msg", "签到成功")
-            elif data.get("code") == 0:
-                result["success"] = True
-                result["message"] = data.get("message", "签到成功")
-            elif "已经签到" in str(data) or "already" in str(data).lower():
-                result["success"] = True
-                result["message"] = "今日已签到"
-            else:
-                result["message"] = data.get("message", data.get("msg", str(data)))
-        except json.JSONDecodeError:
-            text = response.text
-            if "success" in text.lower() or response.status_code == 200:
-                result["success"] = True
-                result["message"] = "签到成功"
-            else:
-                result["message"] = f"响应解析失败: {text[:100]}"
-    except httpx.HTTPStatusError as e:
-        result["message"] = f"HTTP 错误: {e.response.status_code}"
-    except Exception as e:
-        result["message"] = f"签到异常: {str(e)}"
-    return result
-
-
-async def process_account(account: dict, waf_cookies_cache: dict) -> dict:
+async def process_account(account: dict) -> dict:
     """处理单个账号"""
     name = account.get("name", "未命名账号")
     cookies = account.get("cookies", {})
@@ -229,8 +205,6 @@ async def process_account(account: dict, waf_cookies_cache: dict) -> dict:
 
     provider = PROVIDERS.get(provider_name, PROVIDERS["anyrouter"])
     domain = account.get("domain", provider["domain"])
-    sign_in_path = account.get("sign_in_path", provider["sign_in_path"])
-    user_info_path = account.get("user_info_path", provider["user_info_path"])
 
     result = {
         "name": name,
@@ -244,61 +218,41 @@ async def process_account(account: dict, waf_cookies_cache: dict) -> dict:
 
     log(f"正在处理账号: {name} ({provider_name})")
 
-    # 获取该域名的 WAF cookies（有缓存则复用）
-    if domain not in waf_cookies_cache:
-        waf_cookies_cache[domain] = await get_waf_cookies(domain)
-    waf_cookies = waf_cookies_cache[domain]
+    # 使用 Playwright 执行所有操作
+    sign_result, user_info, new_session = await playwright_session(
+        domain, cookies, api_user, username, password
+    )
 
-    # 合并 WAF cookies 和用户 session cookies
-    all_cookies = {**waf_cookies, **cookies}
-    cookie_str = "; ".join([f"{k}={v}" for k, v in all_cookies.items()])
-
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        client.headers["Cookie"] = cookie_str
-        if api_user:
-            client.headers["New-Api-User"] = str(api_user)
-
-        # 先检测 session 是否有效
-        user_info = await get_user_info(client, domain, user_info_path)
-        session_valid = user_info is not None
-
-        # 如果 session 无效且有账号密码，尝试自动登录
-        if not session_valid and username and password:
-            log("Session 已过期，尝试自动登录...", "WARN")
-            new_session = await auto_login(domain, username, password, waf_cookies)
-            if new_session:
-                # 用新 session 重新构建 cookies
-                all_cookies["session"] = new_session
-                cookie_str = "; ".join([f"{k}={v}" for k, v in all_cookies.items()])
-                client.headers["Cookie"] = cookie_str
-                log("已使用新 session cookie")
-            else:
-                log("自动登录失败", "ERROR")
-
-        # 执行签到
-        sign_result = await do_sign_in(client, domain, sign_in_path)
-        result["success"] = sign_result["success"]
-        result["message"] = sign_result["message"]
-
-        if result["success"]:
-            log(f"签到结果: {result['message']}")
+    # 处理签到结果
+    if sign_result:
+        if sign_result.get("success") is True:
+            result["success"] = True
+            result["message"] = sign_result.get("message", "签到成功")
+        elif "已经签到" in str(sign_result) or "already" in str(sign_result).lower():
+            result["success"] = True
+            result["message"] = "今日已签到"
         else:
-            log(f"签到失败: {result['message']}", "ERROR")
+            result["message"] = sign_result.get("message", str(sign_result))
+    else:
+        result["message"] = "签到请求失败"
 
-        # 获取余额（签到后）
-        await asyncio.sleep(1)
-        user_info = await get_user_info(client, domain, user_info_path)
-        if user_info:
-            quota = user_info.get("quota", 0)
-            used = user_info.get("used_quota", 0)
+    if result["success"]:
+        log(f"签到结果: {result['message']}")
+    else:
+        log(f"签到失败: {result['message']}", "ERROR")
 
-            result["balance"] = quota / 500000
-            result["used"] = used / 500000
-            result["quota"] = (quota + used) / 500000
+    # 处理余额信息
+    if user_info:
+        quota = user_info.get("quota", 0)
+        used = user_info.get("used_quota", 0)
 
-            log(f"当前余额: ${result['balance']:.2f}, 历史消耗: ${result['used']:.2f}, 总获得: ${result['quota']:.2f}")
-        else:
-            log("未能获取余额信息", "WARN")
+        result["balance"] = quota / 500000
+        result["used"] = used / 500000
+        result["quota"] = (quota + used) / 500000
+
+        log(f"当前余额: ${result['balance']:.2f}, 历史消耗: ${result['used']:.2f}, 总获得: ${result['quota']:.2f}")
+    else:
+        log("未能获取余额信息", "WARN")
 
     return result
 
@@ -334,10 +288,9 @@ async def main():
 
     log(f"共找到 {len(accounts)} 个账号")
 
-    waf_cookies_cache = {}
     results = []
     for account in accounts:
-        result = await process_account(account, waf_cookies_cache)
+        result = await process_account(account)
         results.append(result)
         log("-" * 30)
 
