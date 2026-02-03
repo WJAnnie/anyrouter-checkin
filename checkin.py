@@ -78,7 +78,7 @@ async def playwright_session(domain: str, cookies: dict, api_user: str = "", use
             browser = await p.chromium.launch(headless=True)
             context = await browser.new_context(user_agent=HEADERS["User-Agent"])
 
-            # 添加用户的 session cookie（在创建页面前）
+            # 添加用户的 session cookie
             if cookies.get("session"):
                 await context.add_cookies([{
                     "name": "session",
@@ -89,35 +89,40 @@ async def playwright_session(domain: str, cookies: dict, api_user: str = "", use
 
             page = await context.new_page()
 
-            # 用于捕获 /api/user/self 的响应
-            captured_user_info = {}
+            # 用于捕获 API 响应
+            captured_data = {"user_info": None, "sign_in": None}
 
             async def handle_response(response):
-                if "/api/user/self" in response.url and response.status == 200:
-                    try:
-                        data = await response.json()
-                        if data.get("success") and data.get("data"):
-                            captured_user_info["data"] = data["data"]
-                        elif data.get("data"):
-                            captured_user_info["data"] = data["data"]
-                    except Exception:
-                        pass
+                try:
+                    url = response.url
+                    if response.status == 200:
+                        if "/api/user/self" in url:
+                            data = await response.json()
+                            if data.get("success") and data.get("data"):
+                                captured_data["user_info"] = data["data"]
+                            elif data.get("data"):
+                                captured_data["user_info"] = data["data"]
+                        elif "/api/user/sign_in" in url:
+                            data = await response.json()
+                            captured_data["sign_in"] = data
+                except Exception:
+                    pass
 
             page.on("response", handle_response)
 
-            # 访问首页，等待 WAF JS 执行
+            # 访问首页
             log(f"正在通过浏览器访问 {domain}...")
             await page.goto(domain, wait_until="networkidle", timeout=60000)
             await page.wait_for_timeout(5000)
 
-            # 导航到 console 页面，触发 SPA 的 API 调用
+            # 导航到 console
             log("导航到 console 页面...")
             await page.goto(f"{domain}/console", wait_until="networkidle", timeout=60000)
             await page.wait_for_timeout(5000)
 
-            # 检查是否需要登录
+            # 检查 session 是否有效
             current_url = page.url
-            session_valid = "login" not in current_url and captured_user_info.get("data") is not None
+            session_valid = "login" not in current_url and captured_data.get("user_info") is not None
 
             if not session_valid and username and password:
                 log("Session 无效，尝试浏览器内登录...", "WARN")
@@ -130,8 +135,7 @@ async def playwright_session(domain: str, cookies: dict, api_user: str = "", use
                                 body: JSON.stringify({{username: '{username}', password: '{password}'}}),
                                 credentials: 'include'
                             }});
-                            const data = await resp.json();
-                            return data;
+                            return await resp.json();
                         }} catch (e) {{
                             return {{success: false, message: e.toString()}};
                         }}
@@ -145,58 +149,72 @@ async def playwright_session(domain: str, cookies: dict, api_user: str = "", use
                         if c["name"] == "session":
                             new_session = c["value"]
                             break
-                    # 登录后重新导航到 console
-                    await page.goto(f"{domain}/console", wait_until="networkidle", timeout=60000)
-                    await page.wait_for_timeout(5000)
+                    # 重新加载 console 页面获取用户信息
+                    await page.reload(wait_until="networkidle", timeout=60000)
+                    await page.wait_for_timeout(3000)
                 else:
                     msg = login_result.get('message', '未知错误') if login_result else '无响应'
                     log(f"浏览器内登录失败: {msg}", "ERROR")
 
-            # 使用 Playwright APIRequestContext 发请求（共享浏览器 cookies）
-            api_headers = {"Accept": "application/json", "Content-Type": "application/json"}
-            if api_user:
-                api_headers["New-Api-User"] = str(api_user)
-
-            # 执行签到
+            # 执行签到 - 通过页面内 JavaScript
             log("执行签到...")
-            try:
-                sign_resp = await context.request.post(
-                    f"{domain}/api/user/sign_in",
-                    headers=api_headers,
-                    data="{}"
-                )
-                sign_text = await sign_resp.text()
-                if sign_text.startswith("<"):
-                    sign_result = {"success": False, "message": "被 WAF 拦截"}
-                else:
-                    sign_result = json.loads(sign_text)
-            except Exception as e:
-                sign_result = {"success": False, "message": str(e)}
+            api_user_header = f'headers["New-Api-User"] = "{api_user}";' if api_user else ''
+            sign_result = await page.evaluate(f"""
+                async () => {{
+                    try {{
+                        const headers = {{'Accept': 'application/json', 'Content-Type': 'application/json'}};
+                        {api_user_header}
+                        const resp = await fetch('{domain}/api/user/sign_in', {{
+                            method: 'POST',
+                            headers: headers,
+                            body: '{{}}',
+                            credentials: 'include'
+                        }});
+                        const text = await resp.text();
+                        if (text.startsWith('<')) return {{success: false, message: '被 WAF 拦截'}};
+                        return JSON.parse(text);
+                    }} catch (e) {{
+                        return {{success: false, message: e.toString()}};
+                    }}
+                }}
+            """)
 
-            # 获取余额
-            await page.wait_for_timeout(1000)
+            # 等待并获取余额
+            await page.wait_for_timeout(2000)
             log("获取用户余额...")
-            try:
-                info_resp = await context.request.get(
-                    f"{domain}/api/user/self",
-                    headers=api_headers
-                )
-                info_text = await info_resp.text()
-                if not info_text.startswith("<"):
-                    data = json.loads(info_text)
-                    if data.get("success") and data.get("data"):
-                        user_info = data["data"]
-                    elif data.get("data"):
-                        user_info = data["data"]
-                    else:
-                        user_info = data
-            except Exception:
-                pass
 
-            # 如果 API 请求也获取不到，用捕获的数据
-            if not user_info and captured_user_info.get("data"):
-                log("使用页面自动加载时捕获的用户信息")
-                user_info = captured_user_info["data"]
+            # 刷新页面让 SPA 重新获取用户信息
+            await page.reload(wait_until="networkidle", timeout=60000)
+            await page.wait_for_timeout(3000)
+
+            # 使用捕获的数据
+            if captured_data.get("user_info"):
+                user_info = captured_data["user_info"]
+
+            # 如果还没有，手动 fetch 一次
+            if not user_info:
+                fetched = await page.evaluate(f"""
+                    async () => {{
+                        try {{
+                            const headers = {{'Accept': 'application/json', 'Content-Type': 'application/json'}};
+                            {api_user_header}
+                            const resp = await fetch('{domain}/api/user/self', {{
+                                headers: headers,
+                                credentials: 'include'
+                            }});
+                            const text = await resp.text();
+                            if (text.startsWith('<')) return null;
+                            const data = JSON.parse(text);
+                            if (data.success && data.data) return data.data;
+                            if (data.data) return data.data;
+                            return data;
+                        }} catch (e) {{
+                            return null;
+                        }}
+                    }}
+                """)
+                if fetched and fetched.get("quota") is not None:
+                    user_info = fetched
 
             await browser.close()
 
