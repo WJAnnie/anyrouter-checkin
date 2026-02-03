@@ -248,10 +248,64 @@ async def process_account(account: dict) -> dict:
 
     log(f"正在处理账号: {name} ({provider_name})")
 
-    # 使用 Playwright 执行所有操作
+    # 使用 Playwright 执行操作
     sign_result, user_info, new_session = await playwright_session(
         domain, cookies, api_user, username, password
     )
+
+    # 如果 Playwright 签到失败（被 WAF 拦截），尝试用 httpx 配合 Playwright 获取的 cookies
+    if sign_result and sign_result.get("message") == "被 WAF 拦截":
+        log("尝试备用方案: 使用 httpx 签到...", "WARN")
+        try:
+            from playwright.async_api import async_playwright
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(headless=True)
+                context = await browser.new_context(user_agent=HEADERS["User-Agent"])
+
+                # 添加用户 session
+                if cookies.get("session"):
+                    await context.add_cookies([{
+                        "name": "session",
+                        "value": cookies["session"],
+                        "domain": domain.replace("https://", "").replace("http://", ""),
+                        "path": "/"
+                    }])
+
+                page = await context.new_page()
+                await page.goto(domain, wait_until="networkidle", timeout=60000)
+                await page.wait_for_timeout(5000)
+
+                # 获取所有 cookies
+                all_cookies = await context.cookies()
+                cookie_dict = {c["name"]: c["value"] for c in all_cookies}
+                await browser.close()
+
+            # 用 httpx 发请求
+            cookie_str = "; ".join([f"{k}={v}" for k, v in cookie_dict.items()])
+            headers = {**HEADERS, "Cookie": cookie_str}
+            if api_user:
+                headers["New-Api-User"] = str(api_user)
+
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                # 签到
+                resp = await client.post(f"{domain}/api/user/sign_in", headers=headers, json={})
+                text = resp.text
+                if not text.startswith("<"):
+                    sign_result = json.loads(text)
+                    log(f"备用方案签到结果: {sign_result}")
+
+                # 获取余额
+                await asyncio.sleep(1)
+                resp = await client.get(f"{domain}/api/user/self", headers=headers)
+                text = resp.text
+                if not text.startswith("<"):
+                    data = json.loads(text)
+                    if data.get("success") and data.get("data"):
+                        user_info = data["data"]
+                    elif data.get("data"):
+                        user_info = data["data"]
+        except Exception as e:
+            log(f"备用方案失败: {e}", "ERROR")
 
     # 处理签到结果
     if sign_result:
