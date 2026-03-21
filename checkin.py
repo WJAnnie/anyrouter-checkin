@@ -16,6 +16,7 @@ from playwright.async_api import async_playwright
 
 from utils.config import AccountConfig, AppConfig, load_accounts_config
 from utils.notify import notify
+from web.browser_checkin import browser_login_checkin
 
 load_dotenv()
 
@@ -374,6 +375,45 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 		return False, None
 
 	print(f'[INFO] {account_name}: Using provider "{account.provider}" ({provider_config.domain})')
+
+	# 浏览器登录模式
+	if account.auth_method == 'browser_login':
+		if not account.username or not account.password:
+			print(f'[FAILED] {account_name}: Browser login requires username and password')
+			return False, None
+
+		print(f'[INFO] {account_name}: Using browser login mode')
+		result = await browser_login_checkin(
+			account_name=account_name,
+			domain=provider_config.domain,
+			login_path=provider_config.login_path,
+			username=account.username,
+			password=account.password,
+			user_info_path=provider_config.user_info_path,
+			sign_in_path=provider_config.sign_in_path,
+		)
+
+		if result['success']:
+			print(f'[SUCCESS] {account_name}: {result["message"]}')
+			user_info = {
+				'success': True,
+				'quota': result.get('quota'),
+				'used_quota': result.get('used_quota'),
+				'display': f':money: Current balance: ${result.get("quota")}, Used: ${result.get("used_quota")}',
+				'checkin_status': 'success',
+				'checkin_message': result['message'],
+			}
+			return True, user_info
+		else:
+			print(f'[FAILED] {account_name}: {result["message"]}')
+			return False, {
+				'success': False,
+				'error': result['message'],
+				'checkin_status': 'failed',
+				'checkin_message': result['message'],
+			}
+
+	# Cookie 模式（原有逻辑）
 
 	user_cookies = parse_cookies(account.cookies)
 	if not user_cookies:

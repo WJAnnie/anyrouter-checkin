@@ -155,18 +155,42 @@ class AppConfig:
 class AccountConfig:
 	"""账号配置"""
 
-	cookies: dict | str
-	api_user: str
+	cookies: dict | str | None = None
+	api_user: str | None = None
 	provider: str = 'anyrouter'
 	name: str | None = None
+	auth_method: Literal['cookie', 'browser_login'] = 'cookie'
+	username: str | None = None
+	password: str | None = None
 
 	@classmethod
 	def from_dict(cls, data: dict, index: int) -> 'AccountConfig':
-		"""从字典创建 AccountConfig"""
+		"""从字典创建 AccountConfig
+
+		支持两种格式:
+		- Cookie 模式: {"cookies": {...}, "api_user": "123", "provider": "anyrouter"}
+		- 浏览器登录: {"username": "user", "password": "pass", "provider": "anyrouter"}
+		"""
 		provider = data.get('provider', 'anyrouter')
 		name = data.get('name', f'Account {index + 1}')
 
-		return cls(cookies=data['cookies'], api_user=data['api_user'], provider=provider, name=name if name else None)
+		# 自动检测认证方式
+		if 'username' in data and 'password' in data:
+			return cls(
+				auth_method='browser_login',
+				username=data['username'],
+				password=data['password'],
+				provider=provider,
+				name=name if name else None,
+			)
+		else:
+			return cls(
+				auth_method='cookie',
+				cookies=data['cookies'],
+				api_user=data['api_user'],
+				provider=provider,
+				name=name if name else None,
+			)
 
 	def get_display_name(self, index: int) -> str:
 		"""获取显示名称"""
@@ -193,8 +217,11 @@ def load_accounts_config() -> list[AccountConfig] | None:
 				print(f'ERROR: Account {i + 1} configuration format is incorrect')
 				return None
 
-			if 'cookies' not in account_dict or 'api_user' not in account_dict:
-				print(f'ERROR: Account {i + 1} missing required fields (cookies, api_user)')
+			has_cookie_fields = 'cookies' in account_dict and 'api_user' in account_dict
+			has_browser_fields = 'username' in account_dict and 'password' in account_dict
+
+			if not has_cookie_fields and not has_browser_fields:
+				print(f'ERROR: Account {i + 1} missing required fields (cookies+api_user or username+password)')
 				return None
 
 			if 'name' in account_dict and not account_dict['name']:
