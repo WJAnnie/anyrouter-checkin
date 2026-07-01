@@ -35,4 +35,5 @@ jobs:
         env:
           ANYROUTER_ACCOUNTS: ${{ secrets.ANYROUTER_ACCOUNTS }}
           SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
+          GITHUB_SESSION: ${{ secrets.GITHUB_SESSION }}
         run: python checkin.py

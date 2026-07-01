@@ -46,15 +46,17 @@ except ImportError:
 PROVIDERS = {
     "anyrouter": {
         "domain": "https://anyrouter.top",
+        "login_path": "/api/user/login",
         "sign_in_path": "/api/user/sign_in",
         "user_info_path": "/api/user/self",
         "supports_sign_in": True,
     },
     "agentrouter": {
         "domain": "https://agentrouter.org",
+        "login_path": "/api/user/login",
         "sign_in_path": "/api/user/sign_in",
         "user_info_path": "/api/user/self",
-        "supports_sign_in": False,  # AgentRouter 不支持签到功能
+        "supports_sign_in": True,
     },
 }
 
@@ -897,10 +899,10 @@ async def get_waf_cookies(domain: str) -> dict:
     return waf_cookies
 
 
-async def httpx_auto_login(domain: str, username: str, password: str, waf_cookies: dict) -> Tuple[Optional[str], Optional[dict]]:
+async def httpx_auto_login(domain: str, username: str, password: str, waf_cookies: dict, login_path: str = "/api/user/login") -> Tuple[Optional[str], Optional[dict]]:
     """使用用户名密码自动登录,返回 (新 session cookie, login 响应中的 user data)"""
     log(f"正在自动登录: {username}...")
-    login_url = f"{domain}/api/user/login"
+    login_url = f"{domain}{login_path}"
     cookie_str = "; ".join([f"{k}={v}" for k, v in waf_cookies.items()])
     try:
         async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
@@ -980,6 +982,11 @@ async def httpx_do_sign_in(client: httpx.AsyncClient, domain: str, sign_in_path:
             result["message"] = "认证失败，请更新 session cookie"
             return result
 
+        if response.status_code in (404, 405):
+            result["unsupported"] = True
+            result["message"] = "该平台不支持签到接口"
+            return result
+
         try:
             data = response.json()
             if data.get("success") is True:
@@ -994,11 +1001,27 @@ async def httpx_do_sign_in(client: httpx.AsyncClient, domain: str, sign_in_path:
             elif "已经签到" in str(data) or "already" in str(data).lower():
                 result["success"] = True
                 result["message"] = "今日已签到"
+            elif "Invalid URL" in str(data) or "invalid_request_error" in str(data):
+                result["unsupported"] = True
+                result["message"] = "该平台不支持签到接口"
             else:
                 result["message"] = data.get("message", data.get("msg", str(data)))
         except json.JSONDecodeError:
-            text = response.text
-            if "success" in text.lower() or response.status_code == 200:
+            text = response.text.strip()
+            lower_text = text.lower()
+            if (
+                text.startswith("<")
+                or "var arg1=" in lower_text
+                or "cf-ray" in lower_text
+                or "cloudflare" in lower_text
+            ):
+                result["message"] = f"被 WAF 拦截: {text[:100]}"
+            elif (
+                "success" in lower_text
+                or "签到成功" in text
+                or "已经签到" in text
+                or "already" in lower_text
+            ):
                 result["success"] = True
                 result["message"] = "签到成功"
             else:
@@ -1025,8 +1048,10 @@ async def process_account_httpx(account: dict) -> dict:
 
     provider = PROVIDERS.get(provider_name, PROVIDERS["anyrouter"])
     domain = account.get("domain", provider["domain"])
+    login_path = account.get("login_path", provider.get("login_path", "/api/user/login"))
     sign_in_path = account.get("sign_in_path", provider.get("sign_in_path", "/api/user/sign_in"))
     user_info_path = account.get("user_info_path", provider.get("user_info_path", "/api/user/self"))
+    supports_sign_in = account.get("supports_sign_in", provider.get("supports_sign_in", True))
 
     result = {
         "name": name, "provider": provider_name,
@@ -1054,7 +1079,7 @@ async def process_account_httpx(account: dict) -> dict:
 
         if not session_valid and username and password:
             log("Session 已过期,尝试自动登录...", "WARN")
-            new_session, login_user_data = await httpx_auto_login(domain, username, password, waf_cookies)
+            new_session, login_user_data = await httpx_auto_login(domain, username, password, waf_cookies, login_path)
             if new_session:
                 all_cookies["session"] = new_session
                 cookie_str = "; ".join([f"{k}={v}" for k, v in all_cookies.items()])
@@ -1072,9 +1097,21 @@ async def process_account_httpx(account: dict) -> dict:
             else:
                 log("自动登录失败", "ERROR")
 
-        sign_result = await httpx_do_sign_in(client, domain, sign_in_path)
-        result["success"] = sign_result["success"]
-        result["message"] = sign_result["message"]
+        if not user_info:
+            user_info = await httpx_get_user_info(client, domain, user_info_path)
+
+        if supports_sign_in:
+            sign_result = await httpx_do_sign_in(client, domain, sign_in_path)
+            if sign_result.get("unsupported"):
+                result["success"] = user_info is not None
+                result["message"] = "该平台不支持签到功能，已获取余额" if user_info else "该平台不支持签到功能，且获取余额失败"
+            else:
+                result["success"] = sign_result["success"]
+                result["message"] = sign_result["message"]
+        else:
+            result["success"] = user_info is not None
+            result["message"] = "该平台不支持签到功能，已获取余额" if user_info else "该平台不支持签到功能，且获取余额失败"
+
         if result["success"]:
             log(f"签到结果: {result['message']}")
         else:
@@ -1100,18 +1137,19 @@ async def process_account(account: dict) -> dict:
     """处理单个账号 - 根据 provider 分流到 Playwright 或 httpx 流程"""
     provider_name = account.get("provider", "anyrouter")
     provider = PROVIDERS.get(provider_name, PROVIDERS["anyrouter"])
+    cookies = account.get("cookies", {}) or {}
+    username = account.get("username", "")
+    password = account.get("password", "")
 
     # 分流:
-    # - agentrouter (含 supports_sign_in=False): 走 Playwright (前端 SPA 完整 OAuth + localStorage user.id)
-    # - 其他 NewAPI 系平台 (anyrouter 等支持 /api/user/sign_in): 走 httpx + WAF cookies, 旧版稳定流程
-    if provider_name != "agentrouter" and provider.get("supports_sign_in", True):
+    # - 支持 /api/user/sign_in 的 NewAPI 系平台: 走 httpx + WAF cookies + username/password 自动登录
+    # - agentrouter 未配置账号密码/session 时: 保留 Playwright + GitHub OAuth 兼容流程
+    has_httpx_login = bool(username and password) or bool(cookies.get("session"))
+    if provider.get("supports_sign_in", True) and (provider_name != "agentrouter" or has_httpx_login):
         return await process_account_httpx(account)
 
     name = account.get("name", "未命名账号")
-    cookies = account.get("cookies", {})
     api_user = account.get("api_user", "")
-    username = account.get("username", "")
-    password = account.get("password", "")
     github_session = account.get("github_session", "") or os.environ.get("GITHUB_SESSION", "")
     domain = account.get("domain", provider["domain"])
 
@@ -1128,7 +1166,7 @@ async def process_account(account: dict) -> dict:
     log(f"正在处理账号: {name} ({provider_name})")
     
     # 获取平台是否支持签到
-    supports_sign_in = provider.get("supports_sign_in", True)
+    supports_sign_in = account.get("supports_sign_in", provider.get("supports_sign_in", True))
     log(f"平台签到支持: {'是' if supports_sign_in else '否'}")
 
     # 使用 Playwright 执行操作
