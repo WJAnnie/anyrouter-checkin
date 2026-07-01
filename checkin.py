@@ -56,7 +56,9 @@ PROVIDERS = {
         "login_path": "/api/user/login",
         "sign_in_path": "/api/user/sign_in",
         "user_info_path": "/api/user/self",
-        "supports_sign_in": True,
+        # AgentRouter supports username/password login now, but its WAF is stricter
+        # on GitHub Actions. Use the Playwright flow and only fetch balance.
+        "supports_sign_in": False,
     },
 }
 
@@ -578,6 +580,21 @@ async def playwright_session(domain: str, cookies: dict, api_user: str = "", use
 
                     if login_result and login_result.get("success"):
                         log("用户名密码登录成功")
+                        login_user_data = login_result.get("data")
+                        if isinstance(login_user_data, dict):
+                            captured_data["user_info"] = login_user_data
+                            if login_user_data.get("id") and not api_user:
+                                api_user = str(login_user_data["id"])
+                                log(f"从登录响应获取 api_user: {api_user}")
+                            try:
+                                await page.evaluate(
+                                    """(user) => {
+                                        try { localStorage.setItem('user', JSON.stringify(user)); } catch (_) {}
+                                    }""",
+                                    login_user_data,
+                                )
+                            except Exception:
+                                pass
                         await page.reload(wait_until="networkidle", timeout=60000)
                         await random_delay(2, 4)
 
@@ -610,6 +627,16 @@ async def playwright_session(domain: str, cookies: dict, api_user: str = "", use
             # 对于不支持签到的平台（如 AgentRouter），直接通过 API 获取余额
             if not supports_sign_in:
                 log("该平台不支持签到 API,直接通过 /api/user/self 获取余额...")
+                if captured_data.get("user_info"):
+                    user_info = captured_data["user_info"]
+                    log("使用登录响应中的用户信息")
+                    sign_result = {"success": True, "message": "该平台不支持签到功能，已获取余额"}
+                    try:
+                        await browser.close()
+                    except Exception:
+                        pass
+                    return sign_result, user_info, new_session
+
                 # 确保在 console 页(SPA 已加载,localStorage 有 user data)
                 try:
                     if "/console" not in page.url:
@@ -659,6 +686,11 @@ async def playwright_session(domain: str, cookies: dict, api_user: str = "", use
                     sign_result = {"success": True, "message": "该平台不支持签到功能，已获取余额"}
                 else:
                     sign_result = {"success": False, "message": "该平台不支持签到功能，且获取余额失败 (session 可能无效)"}
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
+                return sign_result, user_info, new_session
 
             else:
                 # 支持签到的平台：准备 API 请求头并执行签到

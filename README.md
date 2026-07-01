@@ -164,7 +164,7 @@ python checkin.py --relogin AgentRouter主账号
 ### Q: AgentRouter 账号密码登录失败怎么办
 
 1. 确认 `provider` 是 `agentrouter`,并且 `username` / `password` 是平台账号密码,不是 GitHub 账号密码
-2. 如果接口路径有变化,可在该账号对象里覆盖 `login_path` 或 `sign_in_path`
+2. GitHub Actions 云端默认走 Playwright 浏览器流程,用于绕过 agentrouter 的 WAF
 3. 仍无法登录时,可以临时改用 GitHub OAuth 方式
 
 ### Q: AgentRouter 提示 "GitHub OAuth 失败"
@@ -199,8 +199,8 @@ python checkin.py --help                 # 显示帮助
 | python-dotenv | 本地 .env 加载 |
 
 **流程分发**:
-- 支持 `/api/user/sign_in` 的标准 NewAPI 系平台(含 anyrouter / agentrouter 账号密码登录) → httpx + WAF cookie 复用 + username/password 自登录
-- agentrouter 未配置账号密码或 session 时 → Playwright + GitHub OAuth 持久化 profile
+- anyrouter 等支持 `/api/user/sign_in` 的标准 NewAPI 系平台 → httpx + WAF cookie 复用 + username/password 自登录
+- agentrouter → Playwright 浏览器流程 + username/password 或 GitHub OAuth 登录,默认只获取余额
 
 ## 📜 License
 
