@@ -518,6 +518,10 @@ async def playwright_session(domain: str, cookies: dict, api_user: str = "", use
                                 captured_data["user_info"] = data["data"]
                             elif data.get("data"):
                                 captured_data["user_info"] = data["data"]
+                        elif "/api/user/login" in url:
+                            data = json.loads(text)
+                            if data.get("success") and data.get("data"):
+                                captured_data["user_info"] = data["data"]
                         elif "/api/user/sign_in" in url:
                             data = json.loads(text)
                             captured_data["sign_in"] = data
@@ -595,6 +599,24 @@ async def playwright_session(domain: str, cookies: dict, api_user: str = "", use
                                 )
                             except Exception:
                                 pass
+                    elif username and password:
+                        log(f"用户名密码 API 登录失败: {login_result}", "WARN")
+                        log("尝试页面表单登录...")
+                        try:
+                            await page.goto(f"{domain}/login", wait_until="domcontentloaded", timeout=60000)
+                            await random_delay(1, 2)
+                            await page.locator('input[name="username"], #username').first.fill(username)
+                            await page.locator('input[name="password"], #password').first.fill(password)
+                            await page.locator('button[type="submit"], button:has-text("继续"), button:has-text("登录")').first.click()
+                            await random_delay(3, 5)
+                            if captured_data.get("user_info"):
+                                log("页面表单登录成功")
+                            else:
+                                log("页面表单登录后未捕获用户信息", "WARN")
+                        except Exception as e:
+                            log(f"页面表单登录失败: {e}", "WARN")
+
+                    if captured_data.get("user_info"):
                         await page.reload(wait_until="networkidle", timeout=60000)
                         await random_delay(2, 4)
 
