@@ -603,8 +603,17 @@ async def playwright_session(domain: str, cookies: dict, api_user: str = "", use
                         log(f"用户名密码 API 登录失败: {login_result}", "WARN")
                         log("尝试页面表单登录...")
                         try:
-                            await page.goto(f"{domain}/login", wait_until="domcontentloaded", timeout=60000)
-                            await random_delay(1, 2)
+                            form_ready = False
+                            for attempt in range(1, 4):
+                                await page.goto(f"{domain}/login", wait_until="domcontentloaded", timeout=60000)
+                                await random_delay(3, 5)
+                                username_input = page.locator('input[name="username"], #username').first
+                                if await username_input.is_visible(timeout=5000):
+                                    form_ready = True
+                                    break
+                                log(f"登录表单未出现,等待 WAF JS 后重试 ({attempt}/3)", "WARN")
+                            if not form_ready:
+                                raise RuntimeError("登录页未出现用户名输入框,可能仍被 WAF 拦截")
                             await page.locator('input[name="username"], #username').first.fill(username)
                             await page.locator('input[name="password"], #password').first.fill(password)
                             await page.locator('button[type="submit"], button:has-text("继续"), button:has-text("登录")').first.click()
