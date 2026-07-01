@@ -81,6 +81,34 @@ def log(message: str, level: str = "INFO"):
         print(f"[{timestamp}] [{level}] {safe_message}")
 
 
+def _as_bool(value, default: bool = False) -> bool:
+    """兼容 JSON boolean 和环境变量风格的字符串 boolean。"""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in ("1", "true", "yes", "y", "on"):
+            return True
+        if lowered in ("0", "false", "no", "n", "off"):
+            return False
+    return default
+
+
+def _is_github_actions() -> bool:
+    return _as_bool(os.environ.get("GITHUB_ACTIONS"), False)
+
+
+def _should_soft_fail(account: dict, provider_name: str) -> bool:
+    """返回失败是否只作为警告处理。"""
+    if "fail_soft" in account:
+        return _as_bool(account.get("fail_soft"), False)
+    return provider_name == "agentrouter" and _is_github_actions()
+
+
 def get_accounts() -> list:
     accounts_json = os.environ.get("ANYROUTER_ACCOUNTS", "")
     if not accounts_json:
@@ -1220,6 +1248,8 @@ async def process_account(account: dict) -> dict:
         "name": name,
         "provider": provider_name,
         "success": False,
+        "soft_failed": False,
+        "balance_skipped": False,
         "message": "",
         "quota": None,
         "used": None,
@@ -1255,6 +1285,17 @@ async def process_account(account: dict) -> dict:
     else:
         result["message"] = "签到请求失败"
 
+    if not result["success"] and _should_soft_fail(account, provider_name):
+        original_message = result["message"] or "执行失败"
+        result["success"] = True
+        result["soft_failed"] = True
+        result["balance_skipped"] = True
+        if provider_name == "agentrouter" and _is_github_actions():
+            result["message"] = "GitHub Actions 云端被 AgentRouter WAF 拦截,已跳过(本地运行可登录查余额)"
+        else:
+            result["message"] = f"非阻塞失败: {original_message}"
+        log(f"非阻塞警告: {original_message}", "WARN")
+
     if result["success"]:
         log(f"签到结果: {result['message']}")
     else:
@@ -1271,7 +1312,10 @@ async def process_account(account: dict) -> dict:
 
         log(f"当前余额: ${result['balance']:.2f}, 历史消耗: ${result['used']:.2f}, 总获得: ${result['quota']:.2f}")
     else:
-        log("未能获取余额信息", "WARN")
+        if result.get("balance_skipped"):
+            log("余额获取已跳过: GitHub Actions 云端 AgentRouter WAF 拦截", "WARN")
+        else:
+            log("未能获取余额信息", "WARN")
 
     return result
 
@@ -1359,36 +1403,41 @@ async def main():
         log("-" * 30)
 
     # 统计
-    success_count = sum(1 for r in results if r["success"])
-    fail_count = len(results) - success_count
+    warning_count = sum(1 for r in results if r.get("soft_failed"))
+    success_count = sum(1 for r in results if r["success"] and not r.get("soft_failed"))
+    fail_count = sum(1 for r in results if not r["success"])
 
     log("=" * 50)
     log("签到完成统计")
-    log(f"成功: {success_count}, 失败: {fail_count}")
+    log(f"成功: {success_count}, 警告: {warning_count}, 失败: {fail_count}")
     log("=" * 50)
 
     # 构建推送内容
     notify_lines = []
     for r in results:
-        status = "✅" if r["success"] else "❌"
+        status = "⚠️" if r.get("soft_failed") else ("✅" if r["success"] else "❌")
         line = f"{status} **{r['name']}**: {r['message']}"
         if r["balance"] is not None:
             line += f"\n   - 💰 当前余额: **${r['balance']:.2f}**"
             line += f"\n   - 📊 历史消耗: ${r['used']:.2f}"
+        elif r.get("balance_skipped"):
+            line += f"\n   - 💰 余额: 已跳过(云端 WAF 拦截)"
         else:
             line += f"\n   - 💰 余额: 获取失败"
 
-        log_line = f"{'✓' if r['success'] else '✗'} {r['name']}: {r['message']}"
+        log_status = "⚠" if r.get("soft_failed") else ("✓" if r["success"] else "✗")
+        log_line = f"{log_status} {r['name']}: {r['message']}"
         if r["balance"] is not None:
             log_line += f" | 余额: ${r['balance']:.2f}, 消耗: ${r['used']:.2f}"
         log(log_line)
         notify_lines.append(line)
 
     # Server酱 推送
-    title = f"AnyRouter 签到 - 成功{success_count} 失败{fail_count}"
+    title = f"AnyRouter 签到 - 成功{success_count} 警告{warning_count} 失败{fail_count}"
     content = f"## 📋 签到结果\n\n"
     content += f"- ⏰ 时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
     content += f"- ✅ 成功: {success_count}\n"
+    content += f"- ⚠️ 警告: {warning_count}\n"
     content += f"- ❌ 失败: {fail_count}\n\n"
     content += "---\n\n"
     content += "## 📊 账号详情\n\n"
