@@ -156,11 +156,20 @@ try {
     }
     $env:ANYROUTER_ACCOUNTS = "[{0}]" -f ($agentAccountJsonItems -join ",")
     if ($NoNotify) {
+        $env:DISABLE_NOTIFY = "1"
         $env:SERVERCHAN_KEY = ""
         $env:FEISHU_WEBHOOK = ""
         $env:FEISHU_SECRET = ""
+        $env:FEISHU_APP_ID = ""
+        $env:FEISHU_APP_SECRET = ""
+        $env:FEISHU_RECEIVE_ID_TYPE = ""
+        $env:FEISHU_RECEIVE_ID = ""
         $env:LARK_WEBHOOK = ""
         $env:LARK_SECRET = ""
+        $env:LARK_APP_ID = ""
+        $env:LARK_APP_SECRET = ""
+        $env:LARK_RECEIVE_ID_TYPE = ""
+        $env:LARK_RECEIVE_ID = ""
     }
 
     $pythonExe = Resolve-PythonExe

@@ -106,6 +106,10 @@ def _is_github_actions() -> bool:
     return _as_bool(os.environ.get("GITHUB_ACTIONS"), False)
 
 
+def _notifications_disabled() -> bool:
+    return _as_bool(os.environ.get("DISABLE_NOTIFY"), False) or _as_bool(os.environ.get("NO_NOTIFY"), False)
+
+
 def _should_soft_fail(account: dict, provider_name: str) -> bool:
     """返回失败是否只作为警告处理。"""
     if "fail_soft" in account:
@@ -1328,6 +1332,9 @@ async def process_account(account: dict) -> dict:
 
 async def send_serverchan(title: str, content: str):
     """通过 Server酱 推送通知"""
+    if _notifications_disabled():
+        return
+
     key = os.environ.get("SERVERCHAN_KEY", "")
     if not key:
         return
@@ -1345,6 +1352,26 @@ async def send_serverchan(title: str, content: str):
         log(f"Server酱 推送异常: {e}", "ERROR")
 
 
+def _build_feishu_card(title: str, content: str, has_failure: bool = False, has_warning: bool = False) -> dict:
+    template = "red" if has_failure else ("orange" if has_warning else "green")
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "template": template,
+            "title": {
+                "tag": "plain_text",
+                "content": title,
+            },
+        },
+        "elements": [
+            {
+                "tag": "markdown",
+                "content": content,
+            }
+        ],
+    }
+
+
 def _feishu_sign(timestamp: str, secret: str) -> str:
     string_to_sign = f"{timestamp}\n{secret}"
     hmac_code = hmac.new(
@@ -1355,32 +1382,16 @@ def _feishu_sign(timestamp: str, secret: str) -> str:
     return base64.b64encode(hmac_code).decode("utf-8")
 
 
-async def send_feishu(title: str, content: str, has_failure: bool = False, has_warning: bool = False):
+async def send_feishu_webhook(title: str, content: str, has_failure: bool = False, has_warning: bool = False):
     """通过飞书/Lark 自定义机器人 Webhook 推送通知"""
     webhook = os.environ.get("FEISHU_WEBHOOK", "") or os.environ.get("LARK_WEBHOOK", "")
     if not webhook:
         return
 
     secret = os.environ.get("FEISHU_SECRET", "") or os.environ.get("LARK_SECRET", "")
-    template = "red" if has_failure else ("orange" if has_warning else "green")
     payload = {
         "msg_type": "interactive",
-        "card": {
-            "config": {"wide_screen_mode": True},
-            "header": {
-                "template": template,
-                "title": {
-                    "tag": "plain_text",
-                    "content": title,
-                },
-            },
-            "elements": [
-                {
-                    "tag": "markdown",
-                    "content": content,
-                }
-            ],
-        },
+        "card": _build_feishu_card(title, content, has_failure, has_warning),
     }
 
     if secret:
@@ -1394,11 +1405,79 @@ async def send_feishu(title: str, content: str, has_failure: bool = False, has_w
             data = response.json()
             code = data.get("code", data.get("StatusCode"))
             if code == 0:
-                log("飞书 推送成功")
+                log("飞书 Webhook 推送成功")
             else:
-                log(f"飞书 推送失败: {data.get('msg') or data.get('message') or data}", "ERROR")
+                log(f"飞书 Webhook 推送失败: {data.get('msg') or data.get('message') or data}", "ERROR")
     except Exception as e:
-        log(f"飞书 推送异常: {e}", "ERROR")
+        log(f"飞书 Webhook 推送异常: {e}", "ERROR")
+
+
+async def _get_feishu_tenant_access_token(client: httpx.AsyncClient, app_id: str, app_secret: str) -> Optional[str]:
+    response = await client.post(
+        "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
+        json={"app_id": app_id, "app_secret": app_secret},
+    )
+    data = response.json()
+    if data.get("code") == 0 and data.get("tenant_access_token"):
+        return data["tenant_access_token"]
+
+    log(f"飞书 App 获取 tenant_access_token 失败: {data.get('msg') or data.get('message') or data}", "ERROR")
+    return None
+
+
+async def send_feishu_app(title: str, content: str, has_failure: bool = False, has_warning: bool = False):
+    """通过飞书/Lark 自建应用机器人推送通知"""
+    app_id = os.environ.get("FEISHU_APP_ID", "") or os.environ.get("LARK_APP_ID", "")
+    app_secret = os.environ.get("FEISHU_APP_SECRET", "") or os.environ.get("LARK_APP_SECRET", "")
+    receive_id = os.environ.get("FEISHU_RECEIVE_ID", "") or os.environ.get("LARK_RECEIVE_ID", "")
+    receive_id_type = (
+        os.environ.get("FEISHU_RECEIVE_ID_TYPE", "")
+        or os.environ.get("LARK_RECEIVE_ID_TYPE", "")
+        or "chat_id"
+    )
+
+    if not app_id and not app_secret and not receive_id:
+        return
+    if not app_id or not app_secret:
+        log("飞书 App 推送跳过: 缺少 FEISHU_APP_ID 或 FEISHU_APP_SECRET", "WARN")
+        return
+    if not receive_id:
+        log("飞书 App 推送跳过: 缺少 FEISHU_RECEIVE_ID (如群 chat_id: oc_xxx)", "WARN")
+        return
+
+    payload = {
+        "receive_id": receive_id,
+        "msg_type": "interactive",
+        "content": json.dumps(_build_feishu_card(title, content, has_failure, has_warning), ensure_ascii=False),
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            token = await _get_feishu_tenant_access_token(client, app_id, app_secret)
+            if not token:
+                return
+
+            response = await client.post(
+                "https://open.feishu.cn/open-apis/im/v1/messages",
+                params={"receive_id_type": receive_id_type},
+                headers={"Authorization": f"Bearer {token}"},
+                json=payload,
+            )
+            data = response.json()
+            if data.get("code") == 0:
+                log("飞书 App 推送成功")
+            else:
+                log(f"飞书 App 推送失败: {data.get('msg') or data.get('message') or data}", "ERROR")
+    except Exception as e:
+        log(f"飞书 App 推送异常: {e}", "ERROR")
+
+
+async def send_feishu(title: str, content: str, has_failure: bool = False, has_warning: bool = False):
+    if _notifications_disabled():
+        return
+
+    await send_feishu_webhook(title, content, has_failure, has_warning)
+    await send_feishu_app(title, content, has_failure, has_warning)
 
 
 async def relogin_account(name_or_provider: str):

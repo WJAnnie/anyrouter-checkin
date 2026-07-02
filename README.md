@@ -43,6 +43,10 @@ python checkin.py
 | `SERVERCHAN_KEY` | ❌ | Server 酱推送 key |
 | `FEISHU_WEBHOOK` | ❌ | 飞书/Lark 自定义机器人 Webhook URL |
 | `FEISHU_SECRET` | ❌ | 飞书/Lark 自定义机器人签名密钥,未开启签名可不填 |
+| `FEISHU_APP_ID` | ❌ | 飞书/Lark 自建应用 App ID |
+| `FEISHU_APP_SECRET` | ❌ | 飞书/Lark 自建应用 App Secret |
+| `FEISHU_RECEIVE_ID_TYPE` | ❌ | App 推送接收 ID 类型,默认 `chat_id` |
+| `FEISHU_RECEIVE_ID` | ❌ | App 推送接收目标,如群聊 `oc_xxx` |
 | `GITHUB_SESSION` | ❌ | 全局 GitHub session,当账号未指定 github_session 时使用 |
 
 也可以用 GitHub CLI 更新 production 环境的 Secret:
@@ -51,6 +55,10 @@ python checkin.py
 gh secret set ANYROUTER_ACCOUNTS --env production --body '[{"name":"AgentRouter账号1","provider":"agentrouter","username":"YOUR_AGENTROUTER_USERNAME","password":"YOUR_AGENTROUTER_PASSWORD"},{"name":"AnyRouter账号1","provider":"anyrouter","username":"YOUR_ANYROUTER_USERNAME","password":"YOUR_ANYROUTER_PASSWORD"}]'
 gh secret set FEISHU_WEBHOOK --env production --body 'https://open.feishu.cn/open-apis/bot/v2/hook/xxxx'
 gh secret set FEISHU_SECRET --env production --body 'YOUR_FEISHU_BOT_SECRET'
+gh secret set FEISHU_APP_ID --env production --body 'cli_xxx'
+gh secret set FEISHU_APP_SECRET --env production --body 'YOUR_FEISHU_APP_SECRET'
+gh secret set FEISHU_RECEIVE_ID_TYPE --env production --body 'chat_id'
+gh secret set FEISHU_RECEIVE_ID --env production --body 'oc_xxx'
 ```
 
 `FEISHU_SECRET` 只有在飞书机器人开启“签名校验”时需要配置。没有开启签名时,只配置 `FEISHU_WEBHOOK` 即可。
@@ -161,7 +169,7 @@ python checkin.py --relogin AgentRouter主账号
 SERVERCHAN_KEY=你的SendKey
 ```
 
-### 飞书 / Lark 自定义机器人
+### 飞书 / Lark 自定义机器人 Webhook
 
 1. 飞书群聊 → 群设置 → 群机器人 → 添加机器人 → 自定义机器人
 2. 复制 Webhook URL
@@ -180,6 +188,30 @@ gh secret set FEISHU_SECRET --env production --body 'YOUR_FEISHU_BOT_SECRET'
 ```
 
 `FEISHU_SECRET` 可留空。脚本也兼容 `LARK_WEBHOOK` / `LARK_SECRET` 变量名。
+
+### 飞书 / Lark 自建应用
+
+如果你已有飞书开放平台应用的 App ID / App Secret,也可以走 App API 推送。应用需要具备发送消息相关权限,并且机器人需要能访问目标会话。
+
+本地 `.env` 配置:
+
+```env
+FEISHU_APP_ID=cli_xxx
+FEISHU_APP_SECRET=你的AppSecret
+FEISHU_RECEIVE_ID_TYPE=chat_id
+FEISHU_RECEIVE_ID=oc_xxx
+```
+
+GitHub Actions 则在 `production` 环境 Secrets 里配置同名变量:
+
+```bash
+gh secret set FEISHU_APP_ID --env production --body 'cli_xxx'
+gh secret set FEISHU_APP_SECRET --env production --body 'YOUR_FEISHU_APP_SECRET'
+gh secret set FEISHU_RECEIVE_ID_TYPE --env production --body 'chat_id'
+gh secret set FEISHU_RECEIVE_ID --env production --body 'oc_xxx'
+```
+
+常见 `FEISHU_RECEIVE_ID_TYPE`: `chat_id`、`open_id`、`user_id`、`email`。群聊推荐 `chat_id`,值形如 `oc_xxx`。脚本也兼容 `LARK_APP_ID` / `LARK_APP_SECRET` / `LARK_RECEIVE_ID_TYPE` / `LARK_RECEIVE_ID`。
 
 ## 🔧 配置参数详表
 
