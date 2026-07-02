@@ -4,15 +4,19 @@ AnyRouter 自动签到脚本
 支持多账号、多平台签到，兼容 NewAPI/OneAPI 平台
 使用 Playwright + Stealth 绕过 WAF 获取余额
 支持 GitHub OAuth 登录
-支持 Server酱 推送通知
+支持 Server酱 / 飞书 推送通知
 """
 
 import asyncio
+import base64
+import hashlib
+import hmac
 import json
 import os
 import random
 import re
 import sys
+import time
 from datetime import datetime
 from typing import Optional, Tuple
 
@@ -686,10 +690,12 @@ async def playwright_session(domain: str, cookies: dict, api_user: str = "", use
             # 对于不支持签到的平台（如 AgentRouter），直接通过 API 获取余额
             if not supports_sign_in:
                 log("该平台不支持签到 API,直接通过 /api/user/self 获取余额...")
+                balance_success_message = "AgentRouter 登录成功，已获取余额" if provider_key == "agentrouter" else "该平台不支持签到功能，已获取余额"
+                balance_failure_message = "AgentRouter 登录成功，但获取余额失败 (session 可能无效)" if provider_key == "agentrouter" else "该平台不支持签到功能，且获取余额失败 (session 可能无效)"
                 if captured_data.get("user_info"):
                     user_info = captured_data["user_info"]
                     log("使用登录响应中的用户信息")
-                    sign_result = {"success": True, "message": "该平台不支持签到功能，已获取余额"}
+                    sign_result = {"success": True, "message": balance_success_message}
                     try:
                         await browser.close()
                     except Exception:
@@ -742,9 +748,9 @@ async def playwright_session(domain: str, cookies: dict, api_user: str = "", use
 
                 # 该平台不支持签到 API: 只有真正拿到 user_info 才能算成功
                 if user_info:
-                    sign_result = {"success": True, "message": "该平台不支持签到功能，已获取余额"}
+                    sign_result = {"success": True, "message": balance_success_message}
                 else:
-                    sign_result = {"success": False, "message": "该平台不支持签到功能，且获取余额失败 (session 可能无效)"}
+                    sign_result = {"success": False, "message": balance_failure_message}
                 try:
                     await browser.close()
                 except Exception:
@@ -1339,6 +1345,62 @@ async def send_serverchan(title: str, content: str):
         log(f"Server酱 推送异常: {e}", "ERROR")
 
 
+def _feishu_sign(timestamp: str, secret: str) -> str:
+    string_to_sign = f"{timestamp}\n{secret}"
+    hmac_code = hmac.new(
+        string_to_sign.encode("utf-8"),
+        b"",
+        digestmod=hashlib.sha256,
+    ).digest()
+    return base64.b64encode(hmac_code).decode("utf-8")
+
+
+async def send_feishu(title: str, content: str, has_failure: bool = False, has_warning: bool = False):
+    """通过飞书/Lark 自定义机器人 Webhook 推送通知"""
+    webhook = os.environ.get("FEISHU_WEBHOOK", "") or os.environ.get("LARK_WEBHOOK", "")
+    if not webhook:
+        return
+
+    secret = os.environ.get("FEISHU_SECRET", "") or os.environ.get("LARK_SECRET", "")
+    template = "red" if has_failure else ("orange" if has_warning else "green")
+    payload = {
+        "msg_type": "interactive",
+        "card": {
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "template": template,
+                "title": {
+                    "tag": "plain_text",
+                    "content": title,
+                },
+            },
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "content": content,
+                }
+            ],
+        },
+    }
+
+    if secret:
+        timestamp = str(int(time.time()))
+        payload["timestamp"] = timestamp
+        payload["sign"] = _feishu_sign(timestamp, secret)
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.post(webhook, json=payload)
+            data = response.json()
+            code = data.get("code", data.get("StatusCode"))
+            if code == 0:
+                log("飞书 推送成功")
+            else:
+                log(f"飞书 推送失败: {data.get('msg') or data.get('message') or data}", "ERROR")
+    except Exception as e:
+        log(f"飞书 推送异常: {e}", "ERROR")
+
+
 async def relogin_account(name_or_provider: str):
     """打开有头浏览器,让用户手动完成 GitHub 登录,cookies 自动持久化到 profile 目录。
     后续运行无需 .env 中的 github_session,且 GitHub 会自动续期 _gh_sess。
@@ -1444,6 +1506,7 @@ async def main():
     for line in notify_lines:
         content += f"{line}\n\n"
     await send_serverchan(title, content)
+    await send_feishu(title, content, has_failure=fail_count > 0, has_warning=warning_count > 0)
 
     if fail_count > 0:
         sys.exit(1)

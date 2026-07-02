@@ -157,6 +157,10 @@ try {
     $env:ANYROUTER_ACCOUNTS = "[{0}]" -f ($agentAccountJsonItems -join ",")
     if ($NoNotify) {
         $env:SERVERCHAN_KEY = ""
+        $env:FEISHU_WEBHOOK = ""
+        $env:FEISHU_SECRET = ""
+        $env:LARK_WEBHOOK = ""
+        $env:LARK_SECRET = ""
     }
 
     $pythonExe = Resolve-PythonExe

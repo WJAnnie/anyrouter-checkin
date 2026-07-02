@@ -41,13 +41,19 @@ python checkin.py
 |--------|------|------|
 | `ANYROUTER_ACCOUNTS` | ✅ | 账号配置 JSON(同 .env.example) |
 | `SERVERCHAN_KEY` | ❌ | Server 酱推送 key |
+| `FEISHU_WEBHOOK` | ❌ | 飞书/Lark 自定义机器人 Webhook URL |
+| `FEISHU_SECRET` | ❌ | 飞书/Lark 自定义机器人签名密钥,未开启签名可不填 |
 | `GITHUB_SESSION` | ❌ | 全局 GitHub session,当账号未指定 github_session 时使用 |
 
 也可以用 GitHub CLI 更新 production 环境的 Secret:
 
 ```bash
 gh secret set ANYROUTER_ACCOUNTS --env production --body '[{"name":"AgentRouter账号1","provider":"agentrouter","username":"YOUR_AGENTROUTER_USERNAME","password":"YOUR_AGENTROUTER_PASSWORD"},{"name":"AnyRouter账号1","provider":"anyrouter","username":"YOUR_ANYROUTER_USERNAME","password":"YOUR_ANYROUTER_PASSWORD"}]'
+gh secret set FEISHU_WEBHOOK --env production --body 'https://open.feishu.cn/open-apis/bot/v2/hook/xxxx'
+gh secret set FEISHU_SECRET --env production --body 'YOUR_FEISHU_BOT_SECRET'
 ```
+
+`FEISHU_SECRET` 只有在飞书机器人开启“签名校验”时需要配置。没有开启签名时,只配置 `FEISHU_WEBHOOK` 即可。
 
 3. Actions 标签 → 启用工作流。脚本默认每天北京时间 8:30 自动运行。
 
@@ -142,6 +148,38 @@ python checkin.py --relogin AgentRouter主账号
 ```
 
 会弹出有头 Chromium → 你手动完成 GitHub 登录(含 2FA / 邮件验证) → 按 Enter → profile 自动保存,**无需再修改 .env**。
+
+## 🔔 通知推送
+
+脚本支持多个通知通道并行推送,配置哪个就推哪个。
+
+### Server 酱
+
+本地 `.env` 或 GitHub Actions Secret 中配置:
+
+```env
+SERVERCHAN_KEY=你的SendKey
+```
+
+### 飞书 / Lark 自定义机器人
+
+1. 飞书群聊 → 群设置 → 群机器人 → 添加机器人 → 自定义机器人
+2. 复制 Webhook URL
+3. 本地 `.env` 配置:
+
+```env
+FEISHU_WEBHOOK=https://open.feishu.cn/open-apis/bot/v2/hook/xxxx
+FEISHU_SECRET=如果开启签名校验则填写
+```
+
+GitHub Actions 则在 `production` 环境 Secrets 里配置同名变量:
+
+```bash
+gh secret set FEISHU_WEBHOOK --env production --body 'https://open.feishu.cn/open-apis/bot/v2/hook/xxxx'
+gh secret set FEISHU_SECRET --env production --body 'YOUR_FEISHU_BOT_SECRET'
+```
+
+`FEISHU_SECRET` 可留空。脚本也兼容 `LARK_WEBHOOK` / `LARK_SECRET` 变量名。
 
 ## 🔧 配置参数详表
 
