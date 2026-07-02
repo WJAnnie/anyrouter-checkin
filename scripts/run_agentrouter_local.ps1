@@ -22,6 +22,56 @@ function Write-RunLog {
     Add-Content -LiteralPath $logPath -Encoding UTF8 -Value $line
 }
 
+function Write-ProcessLog {
+    param([string]$Text)
+
+    if (-not $Text) {
+        return
+    }
+
+    $lines = $Text -split "\r?\n"
+    foreach ($line in $lines) {
+        if ($line.Length -eq 0) {
+            continue
+        }
+        [Console]::WriteLine($line)
+        Add-Content -LiteralPath $logPath -Encoding UTF8 -Value $line
+    }
+}
+
+function Invoke-PythonCheckin {
+    param([Parameter(Mandatory = $true)][string]$PythonExe)
+
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $PythonExe
+    $startInfo.Arguments = "-X utf8 checkin.py"
+    $startInfo.WorkingDirectory = $repoRoot
+    $startInfo.UseShellExecute = $false
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    try {
+        $startInfo.StandardOutputEncoding = $utf8NoBom
+        $startInfo.StandardErrorEncoding = $utf8NoBom
+    }
+    catch {
+        # Older PowerShell/.NET combinations may not expose these setters.
+    }
+
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $startInfo
+    [void]$process.Start()
+
+    $stdout = $process.StandardOutput.ReadToEnd()
+    $stderr = $process.StandardError.ReadToEnd()
+    $process.WaitForExit()
+
+    Write-ProcessLog -Text $stdout
+    Write-ProcessLog -Text $stderr
+
+    return $process.ExitCode
+}
+
 function Get-DotEnvValue {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -113,15 +163,7 @@ try {
     Write-RunLog ("AgentRouter local check-in started. account_count={0}" -f $agentAccounts.Count)
     Write-RunLog ("Python: {0}" -f $pythonExe)
 
-    $previousErrorActionPreference = $ErrorActionPreference
-    $ErrorActionPreference = "Continue"
-    try {
-        & $pythonExe "checkin.py" 2>&1 | ForEach-Object { $_.ToString() } | Tee-Object -FilePath $logPath -Append
-        $exitCode = $LASTEXITCODE
-    }
-    finally {
-        $ErrorActionPreference = $previousErrorActionPreference
-    }
+    $exitCode = Invoke-PythonCheckin -PythonExe $pythonExe
 
     Write-RunLog ("AgentRouter local check-in finished. exit_code={0}" -f $exitCode)
     exit $exitCode
