@@ -1375,6 +1375,14 @@ async def process_account(account: dict) -> dict:
     }
 
     log(f"正在处理账号: {name} ({provider_name})")
+
+    if provider_name == "agentrouter" and _is_github_actions():
+        result["success"] = True
+        result["soft_failed"] = True
+        result["balance_skipped"] = True
+        result["message"] = "GitHub Actions 已跳过 AgentRouter; 请使用本地定时任务签到"
+        log(result["message"], "WARN")
+        return result
     
     # 获取平台是否支持签到
     supports_sign_in = account.get("supports_sign_in", provider.get("supports_sign_in", True))

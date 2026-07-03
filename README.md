@@ -53,7 +53,7 @@ python checkin.py
 也可以用 GitHub CLI 更新 production 环境的 Secret:
 
 ```bash
-gh secret set ANYROUTER_ACCOUNTS --env production --body '[{"name":"AgentRouter账号1","provider":"agentrouter","username":"YOUR_AGENTROUTER_USERNAME","password":"YOUR_AGENTROUTER_PASSWORD"},{"name":"AnyRouter账号1","provider":"anyrouter","username":"YOUR_ANYROUTER_USERNAME","password":"YOUR_ANYROUTER_PASSWORD"}]'
+gh secret set ANYROUTER_ACCOUNTS --env production --body '[{"name":"AnyRouter账号1","provider":"anyrouter","username":"YOUR_ANYROUTER_USERNAME","password":"YOUR_ANYROUTER_PASSWORD"}]'
 gh secret set FEISHU_WEBHOOK --env production --body 'https://open.feishu.cn/open-apis/bot/v2/hook/xxxx'
 gh secret set FEISHU_SECRET --env production --body 'YOUR_FEISHU_BOT_SECRET'
 gh secret set FEISHU_APP_ID --env production --body 'cli_xxx'
@@ -66,9 +66,9 @@ gh secret set FEISHU_RECEIVE_ID --env production --body 'oc_xxx'
 
 3. Actions 标签 → 启用工作流。脚本默认每天北京时间 8:30 自动运行。
 
-> ⚠️ **注意**: GitHub Actions 是每次运行后销毁实例,**无法持久化 profile**。云端跑必须在 `ANYROUTER_ACCOUNTS` 里提供 `github_session` 或 `username+password` 让脚本每次自登录。本地运行才能享受持久化 profile 的优势。
+> ⚠️ **注意**: GitHub Actions 是每次运行后销毁实例,**无法持久化 profile**。云端跑必须在 `ANYROUTER_ACCOUNTS` 里提供 `username+password` 让脚本每次自登录。本地运行才能享受持久化 profile 的优势。
 >
-> AgentRouter 的 WAF 对 GitHub-hosted runner 更严格,云端可能出现账号密码正确但登录页仍被 WAF 拦截的情况。脚本默认把 GitHub Actions 上的 AgentRouter 失败作为“警告”处理,不影响 AnyRouter 账号签到和整体退出码;本地运行仍会正常尝试登录并获取余额。
+> AgentRouter 的 WAF 对 GitHub-hosted runner 更严格,建议不要放进 GitHub Actions 的 `ANYROUTER_ACCOUNTS`。AgentRouter 使用本地定时任务 `scripts/run_agentrouter_local.ps1` 签到;如果误放进 GitHub Actions,脚本会直接跳过,不再尝试自动登录。
 
 ## 🎯 账号配置详解
 
@@ -241,9 +241,9 @@ gh secret set FEISHU_RECEIVE_ID --env production --body 'oc_xxx'
 ### Q: AgentRouter 账号密码登录失败怎么办
 
 1. 确认 `provider` 是 `agentrouter`,并且 `username` / `password` 是平台账号密码,不是 GitHub 账号密码
-2. 如果本地运行可以登录,但 GitHub Actions 里提示 API 返回 HTML 或登录表单未出现,通常是 GitHub-hosted runner 被 AgentRouter WAF 拦截
-3. 这种云端 WAF 拦截默认只记为“警告”,不会影响其他账号签到;想强制失败可在该账号配置 `"fail_soft": false`
-4. 如果必须在云端获取 AgentRouter 余额,建议改用可持久化浏览器 profile 的自托管 runner,或改为本地定时任务
+2. GitHub-hosted runner 容易被 AgentRouter WAF 拦截,因此 GitHub Actions 会直接跳过 AgentRouter,不再自动登录
+3. AgentRouter 推荐使用本地定时任务 `scripts/run_agentrouter_local.ps1`
+4. 如果必须在云端获取 AgentRouter 余额,建议改用可持久化浏览器 profile 的自托管 runner
 
 ### Q: AgentRouter 提示 "GitHub OAuth 失败"
 
