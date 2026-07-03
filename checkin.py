@@ -60,8 +60,8 @@ PROVIDERS = {
         "login_path": "/api/user/login",
         "sign_in_path": "/api/user/sign_in",
         "user_info_path": "/api/user/self",
-        # AgentRouter supports username/password login now, but its WAF is stricter
-        # on GitHub Actions. Use the Playwright flow and only fetch balance.
+        # AgentRouter's daily check-in is triggered by a fresh password login,
+        # so the Playwright flow logs out first and then fetches the balance.
         "supports_sign_in": False,
     },
 }
@@ -234,6 +234,91 @@ async def verify_logged_in(page, domain: str) -> bool:
         return bool(data.get("success")) and bool(data.get("data"))
     except Exception:
         return False
+
+
+async def force_agentrouter_password_relogin(page, domain: str) -> None:
+    """AgentRouter needs a fresh password login to count daily check-in."""
+    log("AgentRouter 要求先退出登录,再使用账号密码重新登录")
+    try:
+        logout_result = await page.evaluate(
+            """
+            async (domain) => {
+                const attempts = [
+                    {method: 'POST', path: '/api/user/logout', body: '{}'},
+                    {method: 'GET', path: '/api/user/logout'},
+                    {method: 'POST', path: '/api/user/logout'}
+                ];
+                const results = [];
+                for (const attempt of attempts) {
+                    try {
+                        const options = {
+                            method: attempt.method,
+                            credentials: 'include',
+                            headers: {
+                                'Accept': 'application/json',
+                                'Content-Type': 'application/json'
+                            }
+                        };
+                        if (attempt.body !== undefined) {
+                            options.body = attempt.body;
+                        }
+                        const resp = await fetch(domain + attempt.path, options);
+                        results.push({method: attempt.method, path: attempt.path, status: resp.status});
+                        if (resp.status >= 200 && resp.status < 500) {
+                            break;
+                        }
+                    } catch (e) {
+                        results.push({method: attempt.method, path: attempt.path, error: e.toString()});
+                    }
+                }
+                try {
+                    const host = new URL(domain).hostname;
+                    const cookieDomains = ['', `; domain=${host}`, `; domain=.${host.replace(/^www\\./, '')}`];
+                    for (const cookieDomain of cookieDomains) {
+                        document.cookie = `session=; Max-Age=0; path=/${cookieDomain}`;
+                    }
+                    localStorage.clear();
+                    sessionStorage.clear();
+                } catch (_) {}
+                return results;
+            }
+            """,
+            domain,
+        )
+        if logout_result:
+            summary = ", ".join(
+                f"{item.get('method')} {item.get('path')}={item.get('status', item.get('error', 'unknown'))}"
+                for item in logout_result
+            )
+            log(f"AgentRouter 退出接口尝试结果: {summary}")
+    except Exception as e:
+        log(f"AgentRouter 退出接口调用异常,继续清理本地会话: {e}", "WARN")
+
+    try:
+        await page.evaluate(
+            """
+            () => {
+                try {
+                    const host = location.hostname;
+                    const cookieDomains = ['', `; domain=${host}`, `; domain=.${host.replace(/^www\\./, '')}`];
+                    for (const cookieDomain of cookieDomains) {
+                        document.cookie = `session=; Max-Age=0; path=/${cookieDomain}`;
+                    }
+                    localStorage.clear();
+                    sessionStorage.clear();
+                } catch (_) {}
+            }
+            """
+        )
+        log("已清理 AgentRouter session 和本地登录状态")
+    except Exception as e:
+        log(f"清理 AgentRouter 本地登录状态失败: {e}", "WARN")
+
+    try:
+        await page.goto(f"{domain}/login", wait_until="domcontentloaded", timeout=60000)
+        await random_delay(2, 4)
+    except Exception as e:
+        log(f"进入 AgentRouter 登录页异常,继续尝试 API 登录: {e}", "WARN")
 
 
 async def github_oauth_login(page, context, domain: str, github_session: str = None) -> bool:
@@ -514,6 +599,7 @@ async def playwright_session(domain: str, cookies: dict, api_user: str = "", use
     profile_dir = None
     if provider_key == "agentrouter" and account_name:
         profile_dir = _profile_dir_for(account_name, provider_key)
+    force_password_relogin = provider_key == "agentrouter" and bool(username and password)
 
     try:
         async with async_playwright() as p:
@@ -584,12 +670,24 @@ async def playwright_session(domain: str, cookies: dict, api_user: str = "", use
                 log(f"导航到 console 超时，尝试继续: {e}", "WARN")
                 await random_delay(2, 4)
 
+            if force_password_relogin:
+                await force_agentrouter_password_relogin(page, domain)
+                captured_data["user_info"] = None
+                captured_data["sign_in"] = None
+
             # 检查 session 是否有效
             current_url = page.url
-            session_valid = "login" not in current_url and captured_data.get("user_info") is not None
+            session_valid = (
+                not force_password_relogin
+                and "login" not in current_url
+                and captured_data.get("user_info") is not None
+            )
 
             if not session_valid:
-                log("Session 无效，需要重新登录", "WARN")
+                if force_password_relogin:
+                    log("已退出旧会话,开始使用账号密码重新登录")
+                else:
+                    log("Session 无效，需要重新登录", "WARN")
                 
                 # 尝试 GitHub OAuth 登录
                 if github_session or not (username and password):
@@ -602,24 +700,30 @@ async def playwright_session(domain: str, cookies: dict, api_user: str = "", use
                 # 如果 GitHub OAuth 失败，尝试用户名密码登录
                 if not captured_data.get("user_info") and username and password:
                     log("尝试用户名密码登录...")
-                    login_result = await page.evaluate(f"""
-                        async () => {{
-                            try {{
-                                const resp = await fetch('{domain}/api/user/login', {{
+                    login_result = await page.evaluate(
+                        """
+                        async ({domain, username, password}) => {
+                            try {
+                                const resp = await fetch(`${domain}/api/user/login`, {
                                     method: 'POST',
-                                    headers: {{'Accept': 'application/json', 'Content-Type': 'application/json'}},
-                                    body: JSON.stringify({{username: '{username}', password: '{password}'}}),
+                                    headers: {'Accept': 'application/json', 'Content-Type': 'application/json'},
+                                    body: JSON.stringify({username, password}),
                                     credentials: 'include'
-                                }});
+                                });
                                 return await resp.json();
-                            }} catch (e) {{
-                                return {{success: false, message: e.toString()}};
-                            }}
-                        }}
-                    """)
+                            } catch (e) {
+                                return {success: false, message: e.toString()};
+                            }
+                        }
+                        """,
+                        {"domain": domain, "username": username, "password": password},
+                    )
 
                     if login_result and login_result.get("success"):
-                        log("用户名密码登录成功")
+                        if force_password_relogin:
+                            log("AgentRouter 账号密码重新登录成功")
+                        else:
+                            log("用户名密码登录成功")
                         login_user_data = login_result.get("data")
                         if isinstance(login_user_data, dict):
                             captured_data["user_info"] = login_user_data
@@ -694,8 +798,12 @@ async def playwright_session(domain: str, cookies: dict, api_user: str = "", use
             # 对于不支持签到的平台（如 AgentRouter），直接通过 API 获取余额
             if not supports_sign_in:
                 log("该平台不支持签到 API,直接通过 /api/user/self 获取余额...")
-                balance_success_message = "AgentRouter 登录成功，已获取余额" if provider_key == "agentrouter" else "该平台不支持签到功能，已获取余额"
-                balance_failure_message = "AgentRouter 登录成功，但获取余额失败 (session 可能无效)" if provider_key == "agentrouter" else "该平台不支持签到功能，且获取余额失败 (session 可能无效)"
+                if force_password_relogin:
+                    balance_success_message = "AgentRouter 已退出并重新账号密码登录成功，已获取余额"
+                    balance_failure_message = "AgentRouter 已退出并重新账号密码登录成功，但获取余额失败 (session 可能无效)"
+                else:
+                    balance_success_message = "AgentRouter 登录成功，已获取余额" if provider_key == "agentrouter" else "该平台不支持签到功能，已获取余额"
+                    balance_failure_message = "AgentRouter 登录成功，但获取余额失败 (session 可能无效)" if provider_key == "agentrouter" else "该平台不支持签到功能，且获取余额失败 (session 可能无效)"
                 if captured_data.get("user_info"):
                     user_info = captured_data["user_info"]
                     log("使用登录响应中的用户信息")
