@@ -159,7 +159,7 @@ async def apply_stealth(page):
         log(f"应用 Stealth 失败: {e}", "WARN")
 
 
-async def create_browser_context(playwright, domain: str, profile_dir: Optional[str] = None, headless: bool = True):
+async def create_browser_context(playwright, domain: str, profile_dir: Optional[str] = None, headless: bool = True, channel: Optional[str] = None):
     """创建优化的浏览器上下文。
     profile_dir 给定时使用 launch_persistent_context — cookies 会持久化到该目录,
     GitHub session 在每次访问时由 GitHub 自动续期(_gh_sess rotation),除非用户主动登出。
@@ -191,16 +191,36 @@ async def create_browser_context(playwright, domain: str, profile_dir: Optional[
 
     if profile_dir:
         os.makedirs(profile_dir, exist_ok=True)
-        context = await playwright.chromium.launch_persistent_context(
+        launch_kwargs = dict(
             user_data_dir=profile_dir,
             headless=headless,
             args=common_args,
             **common_kwargs,
         )
+        if channel:
+            launch_kwargs["channel"] = channel
+        try:
+            context = await playwright.chromium.launch_persistent_context(**launch_kwargs)
+        except Exception as e:
+            if not channel:
+                raise
+            log(f"启动 {channel} 失败,回退到 bundled Chromium: {e}", "WARN")
+            launch_kwargs.pop("channel", None)
+            context = await playwright.chromium.launch_persistent_context(**launch_kwargs)
         await context.add_init_script(init_script)
         return context, context
 
-    browser = await playwright.chromium.launch(headless=headless, args=common_args)
+    launch_kwargs = {"headless": headless, "args": common_args}
+    if channel:
+        launch_kwargs["channel"] = channel
+    try:
+        browser = await playwright.chromium.launch(**launch_kwargs)
+    except Exception as e:
+        if not channel:
+            raise
+        log(f"启动 {channel} 失败,回退到 bundled Chromium: {e}", "WARN")
+        launch_kwargs.pop("channel", None)
+        browser = await playwright.chromium.launch(**launch_kwargs)
     context = await browser.new_context(**common_kwargs)
     await context.add_init_script(init_script)
     return browser, context
@@ -236,7 +256,7 @@ async def verify_logged_in(page, domain: str) -> bool:
         return False
 
 
-async def force_agentrouter_password_relogin(page, domain: str) -> None:
+async def force_agentrouter_password_relogin(page, context, domain: str) -> None:
     """AgentRouter needs a fresh password login to count daily check-in."""
     log("AgentRouter 要求先退出登录,再使用账号密码重新登录")
     try:
@@ -295,28 +315,31 @@ async def force_agentrouter_password_relogin(page, domain: str) -> None:
         log(f"AgentRouter 退出接口调用异常,继续清理本地会话: {e}", "WARN")
 
     try:
+        await context.clear_cookies(name="session")
+        log("已清理 AgentRouter session cookie")
+    except Exception as e:
+        log(f"清理 AgentRouter session cookie 失败: {e}", "WARN")
+
+    try:
         await page.evaluate(
             """
             () => {
                 try {
-                    const host = location.hostname;
-                    const cookieDomains = ['', `; domain=${host}`, `; domain=.${host.replace(/^www\\./, '')}`];
-                    for (const cookieDomain of cookieDomains) {
-                        document.cookie = `session=; Max-Age=0; path=/${cookieDomain}`;
-                    }
                     localStorage.clear();
                     sessionStorage.clear();
                 } catch (_) {}
             }
             """
         )
-        log("已清理 AgentRouter session 和本地登录状态")
+        log("已清理 AgentRouter 本地登录状态")
     except Exception as e:
         log(f"清理 AgentRouter 本地登录状态失败: {e}", "WARN")
 
     try:
+        await page.goto(domain, wait_until="domcontentloaded", timeout=60000)
+        await random_delay(4, 7)
         await page.goto(f"{domain}/login", wait_until="domcontentloaded", timeout=60000)
-        await random_delay(2, 4)
+        await random_delay(4, 7)
     except Exception as e:
         log(f"进入 AgentRouter 登录页异常,继续尝试 API 登录: {e}", "WARN")
 
@@ -603,7 +626,15 @@ async def playwright_session(domain: str, cookies: dict, api_user: str = "", use
 
     try:
         async with async_playwright() as p:
-            browser, context = await create_browser_context(p, domain, profile_dir=profile_dir)
+            headless = True
+            browser_channel = None
+            if provider_key == "agentrouter" and username and password and not _is_github_actions():
+                headless = _as_bool(os.environ.get("AGENTROUTER_HEADLESS"), False)
+                browser_channel = os.environ.get("AGENTROUTER_BROWSER_CHANNEL", "chrome").strip() or None
+                log(f"AgentRouter 本地浏览器模式: {'headless' if headless else 'headful'}; channel={browser_channel or 'bundled'}")
+            browser, context = await create_browser_context(
+                p, domain, profile_dir=profile_dir, headless=headless, channel=browser_channel
+            )
             if profile_dir:
                 exists = _profile_has_session(profile_dir)
                 log(f"使用持久化 profile: {profile_dir} ({'已有 session' if exists else '空目录,首次运行'})")
@@ -625,7 +656,7 @@ async def playwright_session(domain: str, cookies: dict, api_user: str = "", use
             page = await context.new_page()
 
             # 用于捕获 API 响应
-            captured_data = {"user_info": None, "sign_in": None}
+            captured_data = {"user_info": None, "sign_in": None, "login": None}
 
             async def handle_response(response):
                 try:
@@ -642,6 +673,7 @@ async def playwright_session(domain: str, cookies: dict, api_user: str = "", use
                                 captured_data["user_info"] = data["data"]
                         elif "/api/user/login" in url:
                             data = json.loads(text)
+                            captured_data["login"] = data
                             if data.get("success") and data.get("data"):
                                 captured_data["user_info"] = data["data"]
                         elif "/api/user/sign_in" in url:
@@ -671,7 +703,12 @@ async def playwright_session(domain: str, cookies: dict, api_user: str = "", use
                 await random_delay(2, 4)
 
             if force_password_relogin:
-                await force_agentrouter_password_relogin(page, domain)
+                if not api_user and captured_data.get("user_info"):
+                    old_user_id = captured_data["user_info"].get("id")
+                    if old_user_id:
+                        api_user = str(old_user_id)
+                        log(f"已记录 AgentRouter user_id 用于重新登录后验证: {api_user}")
+                await force_agentrouter_password_relogin(page, context, domain)
                 captured_data["user_info"] = None
                 captured_data["sign_in"] = None
 
@@ -699,25 +736,64 @@ async def playwright_session(domain: str, cookies: dict, api_user: str = "", use
                 
                 # 如果 GitHub OAuth 失败，尝试用户名密码登录
                 if not captured_data.get("user_info") and username and password:
-                    log("尝试用户名密码登录...")
-                    login_result = await page.evaluate(
-                        """
-                        async ({domain, username, password}) => {
-                            try {
-                                const resp = await fetch(`${domain}/api/user/login`, {
-                                    method: 'POST',
-                                    headers: {'Accept': 'application/json', 'Content-Type': 'application/json'},
-                                    body: JSON.stringify({username, password}),
-                                    credentials: 'include'
-                                });
-                                return await resp.json();
-                            } catch (e) {
-                                return {success: false, message: e.toString()};
-                            }
-                        }
-                        """,
-                        {"domain": domain, "username": username, "password": password},
-                    )
+                    login_result = None
+                    for login_attempt in range(1, 4):
+                        log("尝试用户名密码登录..." if login_attempt == 1 else f"重试用户名密码登录 ({login_attempt}/3)...")
+                        try:
+                            login_result = await page.evaluate(
+                                """
+                                async ({domain, username, password}) => {
+                                    try {
+                                        let turnstile = '';
+                                        try {
+                                            const status = JSON.parse(localStorage.getItem('status') || '{}');
+                                            if (!status.turnstile_check) turnstile = '';
+                                        } catch (_) {}
+                                        const resp = await fetch(`${domain}/api/user/login?turnstile=${encodeURIComponent(turnstile)}`, {
+                                            method: 'POST',
+                                            headers: {'Accept': 'application/json', 'Content-Type': 'application/json'},
+                                            body: JSON.stringify({username, password}),
+                                            credentials: 'include'
+                                        });
+                                        const text = await resp.text();
+                                        if (!text || !text.trim()) {
+                                            return {success: false, status: resp.status, message: `empty response (status=${resp.status})`};
+                                        }
+                                        try {
+                                            const data = JSON.parse(text);
+                                            data.status = resp.status;
+                                            return data;
+                                        } catch (e) {
+                                            return {success: false, status: resp.status, message: e.toString(), raw: text.substring(0, 200)};
+                                        }
+                                    } catch (e) {
+                                        return {success: false, message: e.toString()};
+                                    }
+                                }
+                                """,
+                                {"domain": domain, "username": username, "password": password},
+                            )
+                        except Exception as e:
+                            login_result = {"success": False, "message": f"页面上下文不可用: {e}"}
+                            log(f"用户名密码 API 登录异常: {e}", "WARN")
+                        if login_result and login_result.get("success"):
+                            break
+                        if login_result and login_result.get("status") == 429 and force_password_relogin:
+                            log("AgentRouter 登录接口返回 429,停止自动重试以避免加重限流", "WARN")
+                            break
+                        if login_result and login_result.get("status") == 429 and login_attempt < 3:
+                            wait_seconds = 25 * login_attempt
+                            log(f"AgentRouter 登录被限流(429),等待约 {wait_seconds} 秒后重试", "WARN")
+                            await random_delay(wait_seconds, wait_seconds + 8)
+                            try:
+                                await page.goto(domain, wait_until="domcontentloaded", timeout=60000)
+                                await random_delay(4, 7)
+                                await page.goto(f"{domain}/login", wait_until="domcontentloaded", timeout=60000)
+                                await random_delay(4, 7)
+                            except Exception as e:
+                                log(f"重建 AgentRouter 登录页面失败: {e}", "WARN")
+                            continue
+                        break
 
                     if login_result and login_result.get("success"):
                         if force_password_relogin:
@@ -741,29 +817,90 @@ async def playwright_session(domain: str, cookies: dict, api_user: str = "", use
                                 pass
                     elif username and password:
                         log(f"用户名密码 API 登录失败: {login_result}", "WARN")
-                        log("尝试页面表单登录...")
-                        try:
-                            form_ready = False
-                            for attempt in range(1, 4):
-                                await page.goto(f"{domain}/login", wait_until="domcontentloaded", timeout=60000)
-                                await random_delay(3, 5)
-                                username_input = page.locator('input[name="username"], #username').first
-                                if await username_input.is_visible(timeout=5000):
-                                    form_ready = True
-                                    break
-                                log(f"登录表单未出现,等待 WAF JS 后重试 ({attempt}/3)", "WARN")
-                            if not form_ready:
-                                raise RuntimeError("登录页未出现用户名输入框,可能仍被 WAF 拦截")
-                            await page.locator('input[name="username"], #username').first.fill(username)
-                            await page.locator('input[name="password"], #password').first.fill(password)
-                            await page.locator('button[type="submit"], button:has-text("继续"), button:has-text("登录")').first.click()
-                            await random_delay(3, 5)
-                            if captured_data.get("user_info"):
-                                log("页面表单登录成功")
-                            else:
-                                log("页面表单登录后未捕获用户信息", "WARN")
-                        except Exception as e:
-                            log(f"页面表单登录失败: {e}", "WARN")
+                        if force_password_relogin and api_user:
+                            try:
+                                verified = await page.evaluate(f"""
+                                    async () => {{
+                                        try {{
+                                            const headers = {{'Accept': 'application/json', 'New-Api-User': '{api_user}'}};
+                                            const resp = await fetch('{domain}/api/user/self', {{
+                                                headers: headers,
+                                                credentials: 'include'
+                                            }});
+                                            return {{status: resp.status, text: await resp.text()}};
+                                        }} catch (e) {{
+                                            return {{status: 0, text: e.toString()}};
+                                        }}
+                                    }}
+                                """)
+                                if verified and verified.get("text") and not verified["text"].startswith("<"):
+                                    data = json.loads(verified["text"])
+                                    if data.get("success") and data.get("data"):
+                                        captured_data["user_info"] = data["data"]
+                                        log("登录响应为空,但 /api/user/self 验证成功")
+                            except Exception as e:
+                                log(f"登录后验证 /api/user/self 失败: {e}", "WARN")
+                        if not captured_data.get("user_info"):
+                            log("尝试页面表单登录...")
+                            try:
+                                form_ready = False
+                                for attempt in range(1, 4):
+                                    await page.goto(f"{domain}/login", wait_until="domcontentloaded", timeout=60000)
+                                    await random_delay(4, 7)
+                                    for selector in (
+                                        'button:has-text("使用 邮箱或用户名 登录")',
+                                        'button:has-text("邮箱或用户名")',
+                                        'text="使用 邮箱或用户名 登录"',
+                                    ):
+                                        try:
+                                            password_entry = page.locator(selector).first
+                                            if await password_entry.is_visible(timeout=2000):
+                                                await password_entry.click()
+                                                await random_delay(2, 4)
+                                                break
+                                        except Exception:
+                                            pass
+                                    username_input = page.locator(
+                                        'input[name="username"], #username, '
+                                        'input[placeholder*="用户名"], input[placeholder*="邮箱"]'
+                                    ).first
+                                    if await username_input.is_visible(timeout=5000):
+                                        form_ready = True
+                                        break
+                                    log(f"登录表单未出现,等待页面/Turnstile 后重试 ({attempt}/3)", "WARN")
+                                if not form_ready:
+                                    raise RuntimeError("登录页未出现用户名输入框,可能仍被 WAF 拦截")
+                                turnstile_enabled = False
+                                try:
+                                    turnstile_enabled = await page.evaluate(
+                                        """() => {
+                                            try {
+                                                const status = JSON.parse(localStorage.getItem('status') || '{}');
+                                                return Boolean(status.turnstile_check);
+                                            } catch (_) { return false; }
+                                        }"""
+                                    )
+                                except Exception:
+                                    pass
+                                if turnstile_enabled:
+                                    log("等待 Turnstile 环境校验完成...")
+                                    await random_delay(10, 16)
+                                await page.locator(
+                                    'input[name="username"], #username, input[placeholder*="用户名"], input[placeholder*="邮箱"]'
+                                ).first.fill(username)
+                                await page.locator(
+                                    'input[name="password"], #password, input[placeholder*="密码"]'
+                                ).first.fill(password)
+                                await page.locator(
+                                    'button[type="submit"], button:has-text("继续"), button:has-text("登 录"), button:has-text("登录")'
+                                ).first.click()
+                                await random_delay(6, 10)
+                                if captured_data.get("user_info"):
+                                    log("页面表单登录成功")
+                                else:
+                                    log("页面表单登录后未捕获用户信息", "WARN")
+                            except Exception as e:
+                                log(f"页面表单登录失败: {e}", "WARN")
 
                     if captured_data.get("user_info"):
                         await page.reload(wait_until="networkidle", timeout=60000)

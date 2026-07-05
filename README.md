@@ -143,6 +143,15 @@ anyrouter 会在 session 失效时自动用账号密码重新登录。AgentRoute
 
 **AgentRouter username/password 模式**: 仍使用 `.browser_profile/agentrouter_<name>/` 维持浏览器指纹和 WAF 状态,但每次运行都会先退出 AgentRouter 旧会话,再重新账号密码登录。日志中看到 `AgentRouter 已退出并重新账号密码登录成功，已获取余额` 才表示这次重新登录式签到完成。
 
+本地 AgentRouter 默认优先使用系统 Chrome + headful 模式,以便通过登录页风控。可以用环境变量覆盖:
+
+```env
+AGENTROUTER_HEADLESS=1
+AGENTROUTER_BROWSER_CHANNEL=chrome
+```
+
+`AGENTROUTER_BROWSER_CHANNEL` 留空时会使用 Playwright bundled Chromium。
+
 **首次运行 OAuth 模式**: 脚本读取 `github_session` → OAuth → AgentRouter session 写入 `.browser_profile/agentrouter_<name>/`
 
 **后续运行 OAuth 模式**: 直接复用 profile session,**完全跳过 GitHub OAuth**。GitHub 会在每次访问时自动 rotate `_gh_sess`,只要不在其他浏览器登出 / 改密码,session 可长期有效(实测 6 个月以上)。
