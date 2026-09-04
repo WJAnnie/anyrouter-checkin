@@ -34,7 +34,6 @@ jobs:
       - name: 执行签到
         env:
           ANYROUTER_ACCOUNTS: ${{ secrets.ANYROUTER_ACCOUNTS }}
-          SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
           FEISHU_SECRET: ${{ secrets.FEISHU_SECRET }}
           FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
