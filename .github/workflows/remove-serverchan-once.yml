@@ -40,12 +40,6 @@ jobs:
           s = s.replace('    await send_serverchan(title, content)\n', '')
           p.write_text(s, encoding='utf-8')
 
-          # Actions: stop reading the deleted secret.
-          p = Path('.github/workflows/checkin.yml')
-          s = p.read_text(encoding='utf-8')
-          s = re.sub(r'^\s*SERVERCHAN_KEY:\s*\$\{\{\s*secrets\.SERVERCHAN_KEY\s*\}\}\s*\n', '', s, flags=re.M)
-          p.write_text(s, encoding='utf-8')
-
           # Local PowerShell helper: remove the ServerChan env override.
           p = Path('scripts/run_agentrouter_local.ps1')
           if p.exists():
@@ -78,15 +72,12 @@ jobs:
                   flags=re.S,
               )
               p.write_text(s, encoding='utf-8')
-
-          # Remove this one-time workflow from the final repository state.
-          Path('.github/workflows/remove-serverchan-once.yml').unlink(missing_ok=True)
           PY
 
-      - name: Verify no ServerChan references remain
+      - name: Verify no ServerChan references remain outside this one-time workflow
         shell: bash
         run: |
-          if grep -RniE 'SERVERCHAN|Server ?酱|send_serverchan' --exclude-dir=.git .; then
+          if grep -RniE 'SERVERCHAN|Server ?酱|send_serverchan' --exclude-dir=.git --exclude='remove-serverchan-once.yml' .; then
             echo 'ServerChan references still remain.'
             exit 1
           fi
@@ -96,6 +87,6 @@ jobs:
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -A
+          git add checkin.py README.md .env.example scripts/run_agentrouter_local.ps1
           git commit -m 'chore: remove ServerChan integration'
           git push origin HEAD:master
