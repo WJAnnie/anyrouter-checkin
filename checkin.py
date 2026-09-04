@@ -4,7 +4,7 @@ AnyRouter 自动签到脚本
 支持多账号、多平台签到，兼容 NewAPI/OneAPI 平台
 使用 Playwright + Stealth 绕过 WAF 获取余额
 支持 GitHub OAuth 登录
-支持 Server酱 / 飞书 推送通知
+支持飞书推送通知
 """
 
 import asyncio
@@ -1583,27 +1583,6 @@ async def process_account(account: dict) -> dict:
     return result
 
 
-async def send_serverchan(title: str, content: str):
-    """通过 Server酱 推送通知"""
-    if _notifications_disabled():
-        return
-
-    key = os.environ.get("SERVERCHAN_KEY", "")
-    if not key:
-        return
-
-    url = f"https://sctapi.ftqq.com/{key}.send"
-    try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            response = await client.post(url, data={"title": title, "desp": content})
-            data = response.json()
-            if data.get("code") == 0:
-                log("Server酱 推送成功")
-            else:
-                log(f"Server酱 推送失败: {data.get('message', '')}", "ERROR")
-    except Exception as e:
-        log(f"Server酱 推送异常: {e}", "ERROR")
-
 
 def _build_feishu_card(title: str, content: str, has_failure: bool = False, has_warning: bool = False) -> dict:
     template = "red" if has_failure else ("orange" if has_warning else "green")
@@ -1826,7 +1805,7 @@ async def main():
         log(log_line)
         notify_lines.append(line)
 
-    # Server酱 推送
+    # 飞书推送
     title = f"AnyRouter 签到 - 成功{success_count} 警告{warning_count} 失败{fail_count}"
     content = f"## 📋 签到结果\n\n"
     content += f"- ⏰ 时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
@@ -1837,7 +1816,6 @@ async def main():
     content += "## 📊 账号详情\n\n"
     for line in notify_lines:
         content += f"{line}\n\n"
-    await send_serverchan(title, content)
     await send_feishu(title, content, has_failure=fail_count > 0, has_warning=warning_count > 0)
 
     if fail_count > 0:

@@ -157,7 +157,6 @@ try {
     $env:ANYROUTER_ACCOUNTS = "[{0}]" -f ($agentAccountJsonItems -join ",")
     if ($NoNotify) {
         $env:DISABLE_NOTIFY = "1"
-        $env:SERVERCHAN_KEY = ""
         $env:FEISHU_WEBHOOK = ""
         $env:FEISHU_SECRET = ""
         $env:FEISHU_APP_ID = ""

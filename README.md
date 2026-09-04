@@ -10,7 +10,6 @@
 - 🔄 **自动 fallback** — session 过期自动用 username/password 或 github_session 重新登录
 - 🔁 **AgentRouter 重新登录签到** — AgentRouter 每次先退出旧会话,再用账号密码重新登录并获取余额
 - 🆔 **自动获取 user_id** — 从登录响应或 localStorage 自动提取 `New-Api-User`,无需手动配 `api_user`
-- 📢 **Server 酱推送** — 签到结果自动推送到微信
 - 🔁 **手动续期入口** — `--relogin` 命令在 cookies 失效时打开有头浏览器手动登录
 
 ## 📦 快速开始
@@ -41,7 +40,6 @@ python checkin.py
 | Secret | 必填 | 说明 |
 |--------|------|------|
 | `ANYROUTER_ACCOUNTS` | ✅ | 账号配置 JSON(同 .env.example) |
-| `SERVERCHAN_KEY` | ❌ | Server 酱推送 key |
 | `FEISHU_WEBHOOK` | ❌ | 飞书/Lark 自定义机器人 Webhook URL |
 | `FEISHU_SECRET` | ❌ | 飞书/Lark 自定义机器人签名密钥,未开启签名可不填 |
 | `FEISHU_APP_ID` | ❌ | 飞书/Lark 自建应用 App ID |
@@ -173,13 +171,6 @@ python checkin.py --relogin AgentRouter主账号
 
 脚本支持多个通知通道并行推送,配置哪个就推哪个。
 
-### Server 酱
-
-本地 `.env` 或 GitHub Actions Secret 中配置:
-
-```env
-SERVERCHAN_KEY=你的SendKey
-```
 
 ### 飞书 / Lark 自定义机器人 Webhook
 
