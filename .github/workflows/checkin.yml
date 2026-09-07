@@ -8,10 +8,6 @@ on:
       timezone: 'Asia/Shanghai'
   workflow_dispatch:
     # 支持手动触发
-  push:
-    branches: [master]
-    paths:
-      - '.github/workflows/checkin.yml'
 
 jobs:
   checkin:
@@ -46,4 +42,4 @@ jobs:
           FEISHU_RECEIVE_ID_TYPE: ${{ secrets.FEISHU_RECEIVE_ID_TYPE }}
           FEISHU_RECEIVE_ID: ${{ secrets.FEISHU_RECEIVE_ID }}
           GITHUB_SESSION: ${{ secrets.GITHUB_SESSION }}
-        run: python checkin_runner.py
+        run: python checkin.py
