@@ -3,10 +3,15 @@ name: AnyRouter 自动签到
 
 on:
   schedule:
-    # 每天北京时间 8:30 执行 (UTC 0:30)
-    - cron: '30 0 * * *'
+    # 每天北京时间 8:30 执行；显式使用 Asia/Shanghai 时区，避免 UTC 换算歧义
+    - cron: '30 8 * * *'
+      timezone: 'Asia/Shanghai'
   workflow_dispatch:
     # 支持手动触发
+  push:
+    branches: [master]
+    paths:
+      - '.github/workflows/checkin.yml'
 
 jobs:
   checkin:
