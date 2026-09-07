@@ -46,4 +46,4 @@ jobs:
           FEISHU_RECEIVE_ID_TYPE: ${{ secrets.FEISHU_RECEIVE_ID_TYPE }}
           FEISHU_RECEIVE_ID: ${{ secrets.FEISHU_RECEIVE_ID }}
           GITHUB_SESSION: ${{ secrets.GITHUB_SESSION }}
-        run: python checkin.py
+        run: python checkin_runner.py
